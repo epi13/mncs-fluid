@@ -1,0 +1,116 @@
+mncs 0.18;
+
+// Native contracts for the cross-channel grid: coordinate builder,
+// validation arms, and wall/interior lane identity. All coordinates
+// dyadic: exact `==`.
+
+module mncs.fluid.test.grid1d.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.fluid.grid1d;
+
+test valid_grid_accepted() -> (result: TestResult) {
+    let good: bool = grid_is_ok(check_grid(channel_grid(2.0, 4)));
+    return from_assertion(equals_bool(true, good, 6201));
+}
+
+test bad_height_rejected() -> (result: TestResult) {
+    let bad: bool = match check_grid(channel_grid(0.0, 4)) {
+        GridCheck.Ok => false,
+        GridCheck.BadHeight => true,
+        GridCheck.BadCells => false,
+    };
+    let neg: bool = match check_grid(channel_grid(0.0 - 1.0, 4)) {
+        GridCheck.Ok => false,
+        GridCheck.BadHeight => true,
+        GridCheck.BadCells => false,
+    };
+    return from_assertion(equals_bool(true, bad && neg, 6202));
+}
+
+test zero_cells_rejected() -> (result: TestResult) {
+    let bad: bool = match check_grid(channel_grid(2.0, 0)) {
+        GridCheck.Ok => false,
+        GridCheck.BadHeight => false,
+        GridCheck.BadCells => true,
+    };
+    return from_assertion(equals_bool(true, bad, 6203));
+}
+
+test cell_width_value() -> (result: TestResult) {
+    // H = 2, cells = 4: h = 0.5 exact.
+    let good: bool = match cell_width(channel_grid(2.0, 4)) {
+        Spacing.Value { h } => h == 0.5,
+        Spacing.BadGrid => false,
+    };
+    let bad: bool = match cell_width(channel_grid(0.0, 4)) {
+        Spacing.Value { h } => h != h,
+        Spacing.BadGrid => true,
+    };
+    return from_assertion(equals_bool(true, good && bad, 6204));
+}
+
+test node_coordinates_uniform() -> (result: TestResult) {
+    // Lanes 0..4 over [0, 2]: 0, 0.5, 1, 1.5, 2.
+    let g: ChannelGrid = channel_grid(2.0, 4);
+    let y0: bool = match node_y(g, 0) {
+        NodeY.Value { y } => y == 0.0,
+        NodeY.BadIndex => false,
+        NodeY.BadGrid => false,
+    };
+    let y1: bool = match node_y(g, 1) {
+        NodeY.Value { y } => y == 0.5,
+        NodeY.BadIndex => false,
+        NodeY.BadGrid => false,
+    };
+    let y2: bool = match node_y(g, 2) {
+        NodeY.Value { y } => y == 1.0,
+        NodeY.BadIndex => false,
+        NodeY.BadGrid => false,
+    };
+    let y3: bool = match node_y(g, 3) {
+        NodeY.Value { y } => y == 1.5,
+        NodeY.BadIndex => false,
+        NodeY.BadGrid => false,
+    };
+    let y4: bool = match node_y(g, 4) {
+        NodeY.Value { y } => y == 2.0,
+        NodeY.BadIndex => false,
+        NodeY.BadGrid => false,
+    };
+    return from_assertion(equals_bool(true, y0 && y1 && y2 && y3 && y4, 6205));
+}
+
+test node_out_of_range_rejected() -> (result: TestResult) {
+    let g: ChannelGrid = channel_grid(2.0, 4);
+    let bad: bool = match node_y(g, 5) {
+        NodeY.Value { y } => y != y,
+        NodeY.BadIndex => true,
+        NodeY.BadGrid => false,
+    };
+    let bad_grid: bool = match node_y(channel_grid(0.0, 4), 0) {
+        NodeY.Value { y } => y != y,
+        NodeY.BadIndex => false,
+        NodeY.BadGrid => true,
+    };
+    return from_assertion(equals_bool(true, bad && bad_grid, 6206));
+}
+
+test wall_and_interior_identity() -> (result: TestResult) {
+    let g: ChannelGrid = channel_grid(2.0, 4);
+    let walls: bool = is_wall_lane(g, 0) && is_wall_lane(g, 4);
+    let not_walls: bool = is_wall_lane(g, 1) == false && is_wall_lane(g, 2) == false && is_wall_lane(g, 3) == false;
+    let interior: bool = is_interior_lane(g, 1) && is_interior_lane(g, 2) && is_interior_lane(g, 3);
+    let not_interior: bool = is_interior_lane(g, 0) == false && is_interior_lane(g, 4) == false && is_interior_lane(g, 9) == false;
+    return from_assertion(equals_bool(true, walls && not_walls && interior && not_interior, 6207));
+}
+
+test single_cell_grid_has_no_interior() -> (result: TestResult) {
+    // One cell: two walls joined directly; no interior unknown lane.
+    let g: ChannelGrid = channel_grid(2.0, 1);
+    let ok: bool = grid_is_ok(check_grid(g));
+    let walls: bool = is_wall_lane(g, 0) && is_wall_lane(g, 1);
+    let no_interior: bool = is_interior_lane(g, 0) == false && is_interior_lane(g, 1) == false;
+    return from_assertion(equals_bool(true, ok && walls && no_interior, 6208));
+}

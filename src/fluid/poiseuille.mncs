@@ -1,0 +1,95 @@
+mncs 0.18;
+
+// mncs.fluid.poiseuille.v1 — analytic steady plane-Poiseuille solution.
+//
+// Governing equation (fully developed, steady, incompressible,
+// Newtonian, laminar channel flow, no-slip walls at y = 0 and y = H,
+// uniform driving gradient G = -dp/dx):
+//
+//   mu * d²u/dy² = -G,   u(0) = 0,   u(H) = 0.
+//
+// Closed form:
+//
+//   u(y)   = G/(2*mu) * y * (H - y),
+//   u_max  = G*H²/(8*mu)            (centerline y = H/2),
+//   Q      = G*H³/(12*mu)           (volume flow rate per unit depth),
+//   U_mean = Q/H = G*H²/(12*mu),
+//   tau    = G*H/2                  (wall shear magnitude per wall).
+//
+// Global momentum balance: the pressure force G*H on a slab equals
+// the sum of both wall shears 2*tau. The discrete conservation law
+// converges to this identity as h -> 0 (see model1d).
+//
+// These functions are the INDEPENDENT comparators for verification:
+// each test re-derives the formula from first principles rather than
+// sharing code with the solvers. `center` and `profile` are spelled
+// as separate formulas so their agreement is itself evidence.
+// Viscosity/height guards make unphysical regimes structured
+// `BadInput`; a negative gradient is legitimate reversed flow and is
+// computed, not rejected. Lane positions outside [0, H] are BadInput.
+
+module mncs.fluid.poiseuille.v1;
+
+// Outcome of every analytic evaluation.
+enum Analytic { Value { v: f64 }, BadInput }
+
+// Velocity u(y) in m/s at height y (m) for gradient G (Pa/m),
+// dynamic viscosity mu (Pa·s), channel height H (m).
+fn analytic_u(gradient: f64, viscosity: f64, height: f64, y: f64) -> (result: Analytic) {
+    if viscosity <= 0.0 {
+        return Analytic.BadInput;
+    }
+    if height <= 0.0 {
+        return Analytic.BadInput;
+    }
+    if y < 0.0 {
+        return Analytic.BadInput;
+    }
+    if y > height {
+        return Analytic.BadInput;
+    }
+    return Analytic.Value { v: gradient * y * (height - y) / (2.0 * viscosity) };
+}
+
+// Centerline velocity in m/s, spelled directly as G*H²/(8*mu).
+fn analytic_center(gradient: f64, viscosity: f64, height: f64) -> (result: Analytic) {
+    if viscosity <= 0.0 {
+        return Analytic.BadInput;
+    }
+    if height <= 0.0 {
+        return Analytic.BadInput;
+    }
+    return Analytic.Value { v: gradient * height * height / (8.0 * viscosity) };
+}
+
+// Volume flow rate per unit channel depth in m²/s: G*H³/(12*mu).
+fn analytic_flow_rate(gradient: f64, viscosity: f64, height: f64) -> (result: Analytic) {
+    if viscosity <= 0.0 {
+        return Analytic.BadInput;
+    }
+    if height <= 0.0 {
+        return Analytic.BadInput;
+    }
+    return Analytic.Value { v: gradient * height * height * height / (12.0 * viscosity) };
+}
+
+// Mean (bulk) velocity in m/s: U_mean = Q/H = G*H²/(12*mu).
+fn analytic_mean_velocity(gradient: f64, viscosity: f64, height: f64) -> (result: Analytic) {
+    if viscosity <= 0.0 {
+        return Analytic.BadInput;
+    }
+    if height <= 0.0 {
+        return Analytic.BadInput;
+    }
+    return Analytic.Value { v: gradient * height * height / (12.0 * viscosity) };
+}
+
+// Wall shear-stress magnitude in Pa: tau = G*H/2. Signed by the
+// gradient: reversed flow (G < 0) gives negative shear, which the
+// flux-orientation checks rely on.
+fn analytic_wall_shear(gradient: f64, height: f64) -> (result: Analytic) {
+    if height <= 0.0 {
+        return Analytic.BadInput;
+    }
+    return Analytic.Value { v: gradient * height * 0.5 };
+}

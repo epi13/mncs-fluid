@@ -1,6 +1,29 @@
 # RFC 0001: CFD foundation
 
-Status: Draft
+Status: Partially implemented (foundation slice, 2026-09-26).
+Superseded statements are marked below; the principles stand.
+
+Implemented: governing equations/discretization/BCs as declared
+computation (`stencil1d`, `bc`, `model1d`); stability gate r <= 1/2
+as observable data (`StepCheck`/`Stability`); solver residual,
+convergence, iteration-count and failure evidence (`jacobi`,
+`tridiag` outcomes); conservation + measured mesh convergence as
+first-class criteria (`derived`, refinement tests, oracle).
+
+Deferred (deliberately, not by omission): parallel
+reduction/order expectations (no parallel execution yet — a
+correctness-first decision, not a gap in the proof); acceleration
+layout/scheduling contracts (no accelerated path exists to
+constrain); halo/ghost operations (single-process slice).
+
+Pressure objectives status: stencil operations PROVEN in
+1D; sparse iterative solver pattern PROVEN locally with the
+generic home still OPEN (P-FLUID-SOLVER); structured
+convergence/stability failures PROVEN as data. Multidimensional
+arrays/views, memory layout control, parallel loops/reductions,
+domain decomposition, ghost cells, SIMD, CUDA, async movement:
+OPEN, correctly untouched until a verified solver exists whose
+contract they must preserve.
 
 ## Principles
 

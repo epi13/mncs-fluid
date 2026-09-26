@@ -1,0 +1,212 @@
+mncs 0.18;
+
+// Native contracts for discrete operators and explicit time stepping:
+// stencil values on the quadratic profile, wall/bounds guards, flux
+// orientation, diffusion-number stability, exact short-horizon steps,
+// clock discipline, and update-order determinism.
+
+module mncs.fluid.test.stencil1d.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.fluid.stencil1d;
+
+test second_difference_of_quadratic() -> (result: TestResult) {
+    // u = [0, 1.5, 2, 1.5, 0], h = 0.5: d2 = -G/mu = -4 everywhere inside.
+    let u: [f64; 5] = [0.0, 1.5, 2.0, 1.5, 0.0];
+    let d1: bool = match second_difference_at(u, 1, 4, 0.5) {
+        DiffOut.Value { d2 } => d2 == 0.0 - 4.0,
+        DiffOut.WallLane => false,
+        DiffOut.BadIndex => false,
+        DiffOut.BadSpacing => false,
+    };
+    let d2: bool = match second_difference_at(u, 2, 4, 0.5) {
+        DiffOut.Value { d2 } => d2 == 0.0 - 4.0,
+        DiffOut.WallLane => false,
+        DiffOut.BadIndex => false,
+        DiffOut.BadSpacing => false,
+    };
+    let d3: bool = match second_difference_at(u, 3, 4, 0.5) {
+        DiffOut.Value { d2 } => d2 == 0.0 - 4.0,
+        DiffOut.WallLane => false,
+        DiffOut.BadIndex => false,
+        DiffOut.BadSpacing => false,
+    };
+    return from_assertion(equals_bool(true, d1 && d2 && d3, 6501));
+}
+
+test operator_guards() -> (result: TestResult) {
+    let u: [f64; 5] = [0.0, 1.5, 2.0, 1.5, 0.0];
+    let wall: bool = match second_difference_at(u, 0, 4, 0.5) {
+        DiffOut.Value { d2 } => d2 != d2,
+        DiffOut.WallLane => true,
+        DiffOut.BadIndex => false,
+        DiffOut.BadSpacing => false,
+    };
+    let wall_hi: bool = match second_difference_at(u, 4, 4, 0.5) {
+        DiffOut.Value { d2 } => d2 != d2,
+        DiffOut.WallLane => true,
+        DiffOut.BadIndex => false,
+        DiffOut.BadSpacing => false,
+    };
+    let oob: bool = match second_difference_at(u, 7, 4, 0.5) {
+        DiffOut.Value { d2 } => d2 != d2,
+        DiffOut.WallLane => false,
+        DiffOut.BadIndex => true,
+        DiffOut.BadSpacing => false,
+    };
+    let bad_h: bool = match second_difference_at(u, 2, 4, 0.0) {
+        DiffOut.Value { d2 } => d2 != d2,
+        DiffOut.WallLane => false,
+        DiffOut.BadIndex => false,
+        DiffOut.BadSpacing => true,
+    };
+    return from_assertion(equals_bool(true, wall && wall_hi && oob && bad_h, 6502));
+}
+
+test face_flux_orientation() -> (result: TestResult) {
+    // F = -mu*(u_hi - u_lo)/h = -(1.5)/0.5 = -3 exact.
+    let fwd: bool = match face_flux(1.0, 0.0, 1.5, 0.5) {
+        FluxOut.Value { flux } => flux == 0.0 - 3.0,
+        FluxOut.BadInput => false,
+    };
+    // Antisymmetry: swapping lanes negates the signed flux.
+    let a: f64 = match face_flux(1.0, 0.0, 1.5, 0.5) {
+        FluxOut.Value { flux } => flux,
+        FluxOut.BadInput => 0.0,
+    };
+    let b: f64 = match face_flux(1.0, 1.5, 0.0, 0.5) {
+        FluxOut.Value { flux } => flux,
+        FluxOut.BadInput => 0.0,
+    };
+    let bad: bool = match face_flux(0.0, 0.0, 1.5, 0.5) {
+        FluxOut.Value { flux } => flux != flux,
+        FluxOut.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, fwd && a + b == 0.0 && a == 0.0 - 3.0 && bad, 6503));
+}
+
+test diffusion_number_and_stability() -> (result: TestResult) {
+    // nu = 1, dt = 1/16, h = 1/2: r = (1/16)/(1/4) = 1/4 exact.
+    let r: bool = match diffusion_number(1.0, 0.0625, 0.5) {
+        Rout.Value { r } => r == 0.25,
+        Rout.BadStep => false,
+    };
+    let bad_dt: bool = match diffusion_number(1.0, 0.0, 0.5) {
+        Rout.Value { r } => r != r,
+        Rout.BadStep => true,
+    };
+    let stable: bool = match check_stability(0.25) {
+        Stability.Stable => true,
+        Stability.Unstable => false,
+    };
+    let boundary: bool = match check_stability(stability_limit()) {
+        Stability.Stable => true,
+        Stability.Unstable => false,
+    };
+    let unstable: bool = match check_stability(0.75) {
+        Stability.Stable => false,
+        Stability.Unstable => true,
+    };
+    return from_assertion(equals_bool(true, r && bad_dt && stable && boundary && unstable, 6504));
+}
+
+test check_step_arms() -> (result: TestResult) {
+    let ok: bool = match check_step(0.25, 4) {
+        StepCheck.Ok => true,
+        StepCheck.Unstable => false,
+        StepCheck.BadStep => false,
+    };
+    let unstable: bool = match check_step(0.75, 4) {
+        StepCheck.Ok => false,
+        StepCheck.Unstable => true,
+        StepCheck.BadStep => false,
+    };
+    let bad_r: bool = match check_step(0.0, 4) {
+        StepCheck.Ok => false,
+        StepCheck.Unstable => false,
+        StepCheck.BadStep => true,
+    };
+    let bad_hi: bool = match check_step(0.25, 1) {
+        StepCheck.Ok => false,
+        StepCheck.Unstable => false,
+        StepCheck.BadStep => true,
+    };
+    let limit_ok: bool = step_is_ok(check_step(0.25, 4)) && step_is_ok(check_step(0.75, 4)) == false;
+    return from_assertion(equals_bool(true, ok && unstable && bad_r && bad_hi && limit_ok, 6505));
+}
+
+test explicit_step_one_exact() -> (result: TestResult) {
+    // From rest with r = 1/4, src = 1/4: every interior lane takes 1/4.
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let u2: [f64; 5] = explicit_step_values(rest, 4, 0.25, 0.25);
+    let good: bool = u2[0] == 0.0 && u2[1] == 0.25 && u2[2] == 0.25 && u2[3] == 0.25 && u2[4] == 0.0;
+    return from_assertion(equals_bool(true, good, 6506));
+}
+
+test explicit_step_two_exact() -> (result: TestResult) {
+    // Second step: lanes take 7/16, 1/2, 7/16 (oracle-pinned).
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let u1: [f64; 5] = explicit_step_values(rest, 4, 0.25, 0.25);
+    let u2: [f64; 5] = explicit_step_values(u1, 4, 0.25, 0.25);
+    let good: bool = u2[0] == 0.0 && u2[1] == 0.4375 && u2[2] == 0.5 && u2[3] == 0.4375 && u2[4] == 0.0;
+    return from_assertion(equals_bool(true, good, 6507));
+}
+
+test explicit_step_preserves_symmetry() -> (result: TestResult) {
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let u1: [f64; 5] = explicit_step_values(rest, 4, 0.25, 0.25);
+    let u2: [f64; 5] = explicit_step_values(u1, 4, 0.25, 0.25);
+    return from_assertion(equals_bool(true, u2[1] == u2[3] && u2[0] == u2[4], 6508));
+}
+
+test zero_drive_preserves_zero() -> (result: TestResult) {
+    // Uniform zero field with zero source stays zero: compatible
+    // formulations preserve uniform states.
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let u1: [f64; 5] = explicit_step_values(rest, 4, 0.25, 0.0);
+    let good: bool = u1[0] == 0.0 && u1[1] == 0.0 && u1[2] == 0.0 && u1[3] == 0.0 && u1[4] == 0.0;
+    return from_assertion(equals_bool(true, good, 6509));
+}
+
+test walls_stay_pinned_under_step() -> (result: TestResult) {
+    // Nonzero wall values are Dirichlet data: the step never touches
+    // lanes 0/hi even when the interior evolves.
+    let wall: [f64; 5] = [1.0, 0.0, 0.0, 0.0, 2.0];
+    let u1: [f64; 5] = explicit_step_values(wall, 4, 0.25, 0.25);
+    return from_assertion(equals_bool(true, u1[0] == 1.0 && u1[4] == 2.0, 6510));
+}
+
+test clock_advance_and_horizon() -> (result: TestResult) {
+    let c: SimClock = initial_clock();
+    let zero: bool = c.t == 0.0 && c.step == 0;
+    let one: bool = match advance_clock(c, 0.0625) {
+        ClockOut.Value { clock } => clock.t == 0.0625 && clock.step == 1,
+        ClockOut.BadDt => false,
+    };
+    let bad: bool = match advance_clock(c, 0.0) {
+        ClockOut.Value { clock } => clock.step != clock.step,
+        ClockOut.BadDt => true,
+    };
+    // Closed-form 32-step horizon agrees with folding advance_clock:
+    // t = 32/16 = 2, step = 32.
+    let horizon: bool = match clock_after_steps(0.0625, 32) {
+        ClockOut.Value { clock } => clock.t == 2.0 && clock.step == 32,
+        ClockOut.BadDt => false,
+    };
+    return from_assertion(equals_bool(true, zero && one && bad && horizon, 6511));
+}
+
+test timestep_and_source() -> (result: TestResult) {
+    // dt = r*h^2/nu = 0.25*0.25/1 = 1/16; src = dt*G/rho = 1/4.
+    let dt: bool = match timestep_from_r(1.0, 0.5, 0.25) {
+        DtOut.Value { dt } => dt == 0.0625,
+        DtOut.BadStep => false,
+    };
+    let bad: bool = match timestep_from_r(1.0, 0.5, 0.0) {
+        DtOut.Value { dt } => dt != dt,
+        DtOut.BadStep => true,
+    };
+    let src: f64 = step_source(0.0625, 4.0, 1.0);
+    return from_assertion(equals_bool(true, dt && bad && src == 0.25, 6512));
+}

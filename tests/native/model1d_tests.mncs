@@ -1,0 +1,217 @@
+mncs 0.18;
+
+// End-to-end verification of the plane-Poiseuille channel models
+// (H = 2, G = 4, mu = 1, rho = 1): steady profiles against analysis
+// on three grids, second/first-order refinement of flow rate and wall
+// shear, discrete conservation on every grid, degenerate-model
+// rejection, the 32-step transient approach to steady state, and the
+// discrete-steady fixed-point property of the explicit step.
+//
+// Analytic references (oracle-pinned): center 2, Q 8/3, tau 4.
+// Discrete flow rates: 2, 5/2, 21/8. Discrete shears: 2, 3, 7/2.
+
+module mncs.fluid.test.model1d.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.fluid.props;
+use mncs.fluid.grid1d;
+use mncs.fluid.stencil1d;
+use mncs.fluid.model1d;
+use mncs.numerics.scalar_float;
+
+test steady_3_node_matches_analysis() -> (result: TestResult) {
+    // Single interior lane: Thomas 1x1 is exact (4/2 = 2).
+    let good: bool = match solve_channel_3(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 2)) {
+        Channel3.Value { u0, u1, u2, flow_rate, shear_lo, shear_hi, imbalance } => u0 == 0.0 && u1 == 2.0 && u2 == 0.0 && flow_rate == 2.0 && shear_lo == 2.0 && shear_hi == 0.0 - 2.0 && imbalance == 0.0,
+        Channel3.BadInput => false,
+        Channel3.Singular => false,
+    };
+    return from_assertion(equals_bool(true, good, 6901));
+}
+
+test steady_5_node_matches_analysis() -> (result: TestResult) {
+    // Thomas 3-lane solve lands within rounding of [1.5, 2, 1.5].
+    let tol: f64 = 0.000000000001;
+    let good: bool = match solve_channel_5(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 4)) {
+        Channel5.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => approx(u[1], 1.5, tol, tol) && approx(u[2], 2.0, tol, tol) && approx(u[3], 1.5, tol, tol) && approx(flow_rate, 2.5, tol, tol) && approx(shear_lo, 3.0, tol, tol) && approx(shear_hi, 0.0 - 3.0, tol, tol) && approx(imbalance, 0.0, tol, tol),
+        Channel5.BadInput => false,
+        Channel5.Singular => false,
+    };
+    return from_assertion(equals_bool(true, good, 6902));
+}
+
+test steady_9_node_matches_analysis() -> (result: TestResult) {
+    let tol: f64 = 0.000000000001;
+    let good: bool = match solve_channel_9(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 8)) {
+        Channel9.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => approx(u[1], 0.875, tol, tol) && approx(u[2], 1.5, tol, tol) && approx(u[3], 1.875, tol, tol) && approx(u[4], 2.0, tol, tol) && approx(u[5], 1.875, tol, tol) && approx(u[6], 1.5, tol, tol) && approx(u[7], 0.875, tol, tol) && approx(flow_rate, 2.625, tol, tol) && approx(shear_lo, 3.5, tol, tol) && approx(shear_hi, 0.0 - 3.5, tol, tol) && approx(imbalance, 0.0, tol, tol),
+        Channel9.BadInput => false,
+        Channel9.Singular => false,
+    };
+    return from_assertion(equals_bool(true, good, 6903));
+}
+
+test flow_rate_converges_second_order() -> (result: TestResult) {
+    // Trapezoidal errors 2/3, 1/6, 1/24: ratios exactly 4 (oracle).
+    let q3: f64 = channel_rate_helper(2);
+    let q5: f64 = channel_rate_helper(4);
+    let q9: f64 = channel_rate_helper(8);
+    let exact: f64 = 2.6666666666666665;
+    let e3: f64 = q3 - exact;
+    let e5: f64 = q5 - exact;
+    let e9: f64 = q9 - exact;
+    let tol: f64 = 0.000000000001;
+    let errors: bool = approx(e3, 0.0 - 0.6666666666666666, tol, tol) && approx(e5, 0.0 - 0.16666666666666666, tol, tol) && approx(e9, 0.0 - 0.041666666666666664, tol, tol);
+    let ratio1: bool = approx(e3 / e5, 4.0, 0.000000001, 0.000000001);
+    let ratio2: bool = approx(e5 / e9, 4.0, 0.000000001, 0.000000001);
+    return from_assertion(equals_bool(true, errors && ratio1 && ratio2, 6904));
+}
+
+fn channel_rate_helper(cells: u64) -> (result: f64) {
+    return match solve_channel_n_rate(cells) {
+        Rate3.Value { q } => q,
+        Rate3.Missing => 0.0 - 999.0,
+    };
+}
+
+enum Rate3 { Value { q: f64 }, Missing }
+
+fn solve_channel_n_rate(cells: u64) -> (result: Rate3) {
+    if cells == 2 {
+        return match solve_channel_3(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 2)) {
+            Channel3.Value { u0, u1, u2, flow_rate, shear_lo, shear_hi, imbalance } => Rate3.Value { q: flow_rate },
+            Channel3.BadInput => Rate3.Missing,
+            Channel3.Singular => Rate3.Missing,
+        };
+    }
+    if cells == 4 {
+        return match solve_channel_5(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 4)) {
+            Channel5.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => Rate3.Value { q: flow_rate },
+            Channel5.BadInput => Rate3.Missing,
+            Channel5.Singular => Rate3.Missing,
+        };
+    }
+    return match solve_channel_9(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 8)) {
+        Channel9.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => Rate3.Value { q: flow_rate },
+        Channel9.BadInput => Rate3.Missing,
+        Channel9.Singular => Rate3.Missing,
+    };
+}
+
+test shear_converges_first_order() -> (result: TestResult) {
+    // One-sided shear errors 2, 1, 1/2: ratios exactly 2 (oracle).
+    let s3: f64 = channel_shear_helper(2);
+    let s5: f64 = channel_shear_helper(4);
+    let s9: f64 = channel_shear_helper(8);
+    let e3: f64 = s3 - 4.0;
+    let e5: f64 = s5 - 4.0;
+    let e9: f64 = s9 - 4.0;
+    let tol: f64 = 0.000000000001;
+    let errors: bool = approx(e3, 0.0 - 2.0, tol, tol) && approx(e5, 0.0 - 1.0, tol, tol) && approx(e9, 0.0 - 0.5, tol, tol);
+    let ratio1: bool = approx(e3 / e5, 2.0, 0.000000001, 0.000000001);
+    let ratio2: bool = approx(e5 / e9, 2.0, 0.000000001, 0.000000001);
+    return from_assertion(equals_bool(true, errors && ratio1 && ratio2, 6905));
+}
+
+fn channel_shear_helper(cells: u64) -> (result: f64) {
+    if cells == 2 {
+        return match solve_channel_3(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 2)) {
+            Channel3.Value { u0, u1, u2, flow_rate, shear_lo, shear_hi, imbalance } => shear_lo,
+            Channel3.BadInput => 0.0 - 999.0,
+            Channel3.Singular => 0.0 - 999.0,
+        };
+    }
+    if cells == 4 {
+        return match solve_channel_5(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 4)) {
+            Channel5.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => shear_lo,
+            Channel5.BadInput => 0.0 - 999.0,
+            Channel5.Singular => 0.0 - 999.0,
+        };
+    }
+    return match solve_channel_9(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 8)) {
+        Channel9.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => shear_lo,
+        Channel9.BadInput => 0.0 - 999.0,
+        Channel9.Singular => 0.0 - 999.0,
+    };
+}
+
+test steady_models_reject_degenerate_input() -> (result: TestResult) {
+    let bad_mu: bool = match solve_channel_5(4.0, fluid_props(1.0, 0.0), channel_grid(2.0, 4)) {
+        Channel5.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => u[0] != u[0],
+        Channel5.BadInput => true,
+        Channel5.Singular => false,
+    };
+    let bad_rho: bool = match solve_channel_5(4.0, fluid_props(0.0, 1.0), channel_grid(2.0, 4)) {
+        Channel5.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => u[0] != u[0],
+        Channel5.BadInput => true,
+        Channel5.Singular => false,
+    };
+    let bad_grid: bool = match solve_channel_5(4.0, fluid_props(1.0, 1.0), channel_grid(0.0, 4)) {
+        Channel5.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => u[0] != u[0],
+        Channel5.BadInput => true,
+        Channel5.Singular => false,
+    };
+    let wrong_cells: bool = match solve_channel_5(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 8)) {
+        Channel5.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => u[0] != u[0],
+        Channel5.BadInput => true,
+        Channel5.Singular => false,
+    };
+    return from_assertion(equals_bool(true, bad_mu && bad_rho && bad_grid && wrong_cells, 6906));
+}
+
+test transient_run_approaches_steady() -> (result: TestResult) {
+    // 32 explicit steps (r = 1/4) from rest: t = 2, 32 steps taken,
+    // center within 0.05 of 2, walls exact, profile symmetric.
+    let good: bool = match run_channel_5(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 4), 0.25) {
+        Transient5.Value { u, t, steps } => t == 2.0 && steps == 32 && u[0] == 0.0 && u[4] == 0.0 && u[1] == u[3] && approx(u[2], 2.0, 0.05, 0.0) && approx(u[1], 1.5, 0.05, 0.0),
+        Transient5.BadInput => false,
+        Transient5.Unstable => false,
+    };
+    return from_assertion(equals_bool(true, good, 6907));
+}
+
+test transient_rejects_unstable_and_bad() -> (result: TestResult) {
+    // r = 3/4 is past the 1/2 limit: structured Unstable, not a blowup.
+    let unstable: bool = match run_channel_5(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 4), 0.75) {
+        Transient5.Value { u, t, steps } => u[0] != u[0],
+        Transient5.BadInput => false,
+        Transient5.Unstable => true,
+    };
+    let bad_r: bool = match run_channel_5(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 4), 0.0) {
+        Transient5.Value { u, t, steps } => u[0] != u[0],
+        Transient5.BadInput => true,
+        Transient5.Unstable => false,
+    };
+    let bad_props: bool = match run_channel_5(4.0, fluid_props(1.0, 0.0), channel_grid(2.0, 4), 0.25) {
+        Transient5.Value { u, t, steps } => u[0] != u[0],
+        Transient5.BadInput => true,
+        Transient5.Unstable => false,
+    };
+    return from_assertion(equals_bool(true, unstable && bad_r && bad_props, 6908));
+}
+
+test transient_zero_drive_stays_quiescent() -> (result: TestResult) {
+    let good: bool = match run_channel_5(0.0, fluid_props(1.0, 1.0), channel_grid(2.0, 4), 0.25) {
+        Transient5.Value { u, t, steps } => u[0] == 0.0 && u[1] == 0.0 && u[2] == 0.0 && u[3] == 0.0 && u[4] == 0.0 && t == 2.0 && steps == 32,
+        Transient5.BadInput => false,
+        Transient5.Unstable => false,
+    };
+    return from_assertion(equals_bool(true, good, 6909));
+}
+
+test discrete_steady_is_explicit_fixed_point() -> (result: TestResult) {
+    // One FTCS step (r = 1/4, src = 1/4) from the Thomas steady state
+    // reproduces it to rounding: the two formulations agree.
+    let tol: f64 = 0.000000000001;
+    let good: bool = match solve_channel_5(4.0, fluid_props(1.0, 1.0), channel_grid(2.0, 4)) {
+        Channel5.Value { u, flow_rate, shear_lo, shear_hi, imbalance } => fixed_point_holds(u, tol),
+        Channel5.BadInput => false,
+        Channel5.Singular => false,
+    };
+    return from_assertion(equals_bool(true, good, 6910));
+}
+
+fn fixed_point_holds(u: [f64; 5], tol: f64) -> (result: bool) {
+    let u2: [f64; 5] = explicit_step_values(u, 4, 0.25, 0.25);
+    return approx(u2[0], u[0], tol, tol) && approx(u2[1], u[1], tol, tol) && approx(u2[2], u[2], tol, tol) && approx(u2[3], u[3], tol, tol) && approx(u2[4], u[4], tol, tol);
+}

@@ -1,0 +1,105 @@
+mncs 0.18;
+
+// Native contracts for fluid properties: validation arms, kinematic
+// viscosity, and Reynolds number. Exact `==` throughout except Re,
+// whose 8/3 value is non-dyadic and uses library `approx`.
+
+module mncs.fluid.test.props.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.fluid.props;
+use mncs.numerics.scalar_float;
+
+test valid_props_accepted() -> (result: TestResult) {
+    let good: bool = match check_props(fluid_props(1.0, 1.0)) {
+        PropCheck.Ok => true,
+        PropCheck.BadDensity => false,
+        PropCheck.BadViscosity => false,
+    };
+    return from_assertion(equals_bool(true, good && props_are_ok(check_props(fluid_props(1.0, 1.0))), 6101));
+}
+
+test zero_density_rejected() -> (result: TestResult) {
+    let bad: bool = match check_props(fluid_props(0.0, 1.0)) {
+        PropCheck.Ok => false,
+        PropCheck.BadDensity => true,
+        PropCheck.BadViscosity => false,
+    };
+    return from_assertion(equals_bool(true, bad, 6102));
+}
+
+test negative_viscosity_rejected() -> (result: TestResult) {
+    let bad: bool = match check_props(fluid_props(1.0, 0.0 - 1.0)) {
+        PropCheck.Ok => false,
+        PropCheck.BadDensity => false,
+        PropCheck.BadViscosity => true,
+    };
+    return from_assertion(equals_bool(true, bad, 6103));
+}
+
+test density_checked_before_viscosity() -> (result: TestResult) {
+    // Both bad: density reports first (check order is a contract).
+    let first: bool = match check_props(fluid_props(0.0 - 2.0, 0.0 - 3.0)) {
+        PropCheck.Ok => false,
+        PropCheck.BadDensity => true,
+        PropCheck.BadViscosity => false,
+    };
+    return from_assertion(equals_bool(true, first, 6104));
+}
+
+test kinematic_viscosity_value() -> (result: TestResult) {
+    // nu = mu/rho = 0.5/2 = 0.25, dyadic and exact.
+    let good: bool = match kinematic_viscosity(fluid_props(2.0, 0.5)) {
+        NuOut.Value { nu } => nu == 0.25,
+        NuOut.BadProps => false,
+    };
+    return from_assertion(equals_bool(true, good, 6105));
+}
+
+test kinematic_viscosity_rejects_bad_props() -> (result: TestResult) {
+    let bad: bool = match kinematic_viscosity(fluid_props(0.0, 1.0)) {
+        NuOut.Value { nu } => nu != nu,
+        NuOut.BadProps => true,
+    };
+    return from_assertion(equals_bool(true, bad, 6106));
+}
+
+test reynolds_number_value() -> (result: TestResult) {
+    // Re = rho*U*H/mu = 1*(4/3)*2/1 = 8/3: spelled independently here.
+    let exact: f64 = 1.0 * (4.0 / 3.0) * 2.0 / 1.0;
+    let good: bool = match reynolds_number(1.0, 4.0 / 3.0, 2.0, 1.0) {
+        ReOut.Value { re } => approx(re, exact, 0.000000000000001, 0.000000000000001) && approx(re, 2.6666666666666665, 0.000000000000001, 0.000000000000001),
+        ReOut.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 6107));
+}
+
+test reynolds_number_rejects_unphysical() -> (result: TestResult) {
+    let bad_rho: bool = match reynolds_number(0.0, 1.0, 1.0, 1.0) {
+        ReOut.Value { re } => re != re,
+        ReOut.BadInput => true,
+    };
+    let bad_speed: bool = match reynolds_number(1.0, 0.0 - 1.0, 1.0, 1.0) {
+        ReOut.Value { re } => re != re,
+        ReOut.BadInput => true,
+    };
+    let bad_len: bool = match reynolds_number(1.0, 1.0, 0.0, 1.0) {
+        ReOut.Value { re } => re != re,
+        ReOut.BadInput => true,
+    };
+    let bad_mu: bool = match reynolds_number(1.0, 1.0, 1.0, 0.0) {
+        ReOut.Value { re } => re != re,
+        ReOut.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, bad_rho && bad_speed && bad_len && bad_mu, 6108));
+}
+
+test zero_speed_gives_zero_re() -> (result: TestResult) {
+    // Quiescent flow is valid physics with Re = 0, not a degenerate.
+    let good: bool = match reynolds_number(1.0, 0.0, 2.0, 1.0) {
+        ReOut.Value { re } => re == 0.0,
+        ReOut.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 6109));
+}

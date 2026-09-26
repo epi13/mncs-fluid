@@ -1,0 +1,112 @@
+mncs 0.18;
+
+// mncs.fluid.derived.v1 — fluid-specific derived quantities.
+//
+// Every quantity here is typed, unit-stated, and independently
+// testable; none is a raw scalar pulled from an array without
+// context:
+//
+//   flow rate Q (m²/s, per unit channel depth) — trapezoidal rule
+//     over the node profile: second-order accurate, O(h²);
+//   wall shear tau (Pa) — first-order one-sided difference at each
+//     wall: O(h). Bottom-wall shear is oriented +x, top-wall shear
+//     -x for driven +x flow; their antisymmetry is symmetry evidence.
+//   conservation imbalance (Pa) — the discrete global momentum
+//     identity the steady scheme ACTUALLY satisfies:
+//
+//       (F_top - F_bottom) = G * L_interior,
+//
+//     where F are the viscous face fluxes at the wall faces and
+//     L_interior = (interior-lane count)*h is the pressurized span.
+//     This tends to the continuum balance G*H = 2*tau as h -> 0 but
+//     is exact-as-stated only in this discrete form: the suite pins
+//     the discrete identity to rounding and the continuum limit by
+//     refinement. A converged wrong discretization would fail here,
+//     which is why conservation is verified independently of the
+//     solver residual.
+//
+// Reynolds number and kinematic viscosity live in props (material
+// side); here is the flow-solution side.
+
+module mncs.fluid.derived.v1;
+
+use mncs.fluid.stencil1d;
+
+// Weighted trapezoidal sum over the node profile: half weight on the
+// wall lanes, unit weight inside. Bare total kernel (caller contract:
+// hi >= 1, hi the last lane); the spacing factor is applied by
+// `flow_rate_value`, which owns the h guard.
+fn trap_sum_values<N: Nat>(u: [f64; N], hi: u64) -> (result: f64) {
+    iterate i over u carrying acc: f64 = 0.0 {
+        next acc = acc + trap_weight(i, hi) * u[i];
+    }
+    return acc;
+}
+
+fn trap_weight(i: u64, hi: u64) -> (result: f64) {
+    if i == 0 {
+        return 0.5;
+    }
+    if i == hi {
+        return 0.5;
+    }
+    return 1.0;
+}
+
+// Volume flow rate per unit depth in m²/s: Q = h * trap_sum. The h
+// guard makes a degenerate spacing structured `BadInput`.
+enum RateOut { Value { q: f64 }, BadInput }
+
+fn flow_rate_value(sum: f64, h: f64) -> (result: RateOut) {
+    if h <= 0.0 {
+        return RateOut.BadInput;
+    }
+    return RateOut.Value { q: sum * h };
+}
+
+// Bottom-wall shear in Pa: tau_lo = mu*(u[1]-u[0])/h, oriented +x.
+// Takes lane VALUES (not the profile) so no index contract leaks:
+// the model selects lanes 0 and 1 explicitly.
+enum ShearOut { Value { tau: f64 }, BadInput }
+
+fn wall_shear_lo_value(viscosity: f64, u0: f64, u1: f64, h: f64) -> (result: ShearOut) {
+    if viscosity <= 0.0 {
+        return ShearOut.BadInput;
+    }
+    if h <= 0.0 {
+        return ShearOut.BadInput;
+    }
+    return ShearOut.Value { tau: viscosity * (u1 - u0) / h };
+}
+
+// Top-wall shear in Pa: tau_hi = mu*(u[hi]-u[hi-1])/h, oriented -x
+// for driven flow (negative against the +y outward normal reads
+// positive drag on the fluid — the suite pins the sign relation
+// tau_lo == -tau_hi on symmetric solutions, not the words).
+fn wall_shear_hi_value(viscosity: f64, u_hi_1: f64, u_hi: f64, h: f64) -> (result: ShearOut) {
+    if viscosity <= 0.0 {
+        return ShearOut.BadInput;
+    }
+    if h <= 0.0 {
+        return ShearOut.BadInput;
+    }
+    return ShearOut.Value { tau: viscosity * (u_hi - u_hi_1) / h };
+}
+
+// Discrete global momentum imbalance in Pa:
+//
+//   imbalance = (F_top - F_bottom) - G * span,
+//
+// with F the wall-face viscous fluxes (Pa) and span the pressurized
+// interior length (m). Zero to rounding at any exact discrete steady
+// state. Total on finite inputs; non-finite inputs trap at the first
+// comparison upstream (fail-fast with a span, never silent NaN).
+fn conservation_imbalance_value(f_bottom: f64, f_top: f64, gradient: f64, span: f64) -> (result: f64) {
+    return (f_top - f_bottom) - gradient * span;
+}
+
+// Pressurized interior span in m: (interior-lane count)*h. The model
+// passes hi - 1 (lanes strictly between the walls) as the count.
+fn interior_span_value(interior_lanes: u64, h: f64) -> (result: f64) {
+    return (interior_lanes as f64) * h;
+}

@@ -1,0 +1,246 @@
+mncs 0.18;
+
+// mncs.fluid.stencil1d.v1 — discrete operators and explicit time stepping.
+//
+// Discretization (uniform grid, spacing h, node lanes 0..hi):
+//
+//   second difference: d2u_i = (u[i-1] - 2u[i] + u[i+1]) / h²,
+//   face flux (viscous momentum, +y orientation):
+//                  F(i+1/2) = -mu * (u[i+1] - u[i]) / h,
+//   explicit (FTCS) momentum-diffusion step with source src = dt*G/rho:
+//      u2[i] = u[i] + r*(u[i-1] - 2u[i] + u[i+1]) + src,
+//      r = nu*dt/h² (diffusion number).
+//
+// The second difference is second-order accurate, O(h²), on smooth
+// fields; the face flux is the conservative flux of the finite-volume
+// reading of the same stencil (flux antisymmetry is tested: swapping
+// lanes negates the flux). Walls (lanes 0 and hi) carry Dirichlet
+// values, never PDE residual: the operator reports `WallLane` there
+// instead of fabricating a one-sided value.
+//
+// Stability: explicit diffusion is stable for r <= 1/2 (von Neumann).
+// An unstable r is structured `Unstable { r }` evidence, never a
+// silent blowup: the step refuses to run. A non-positive r, missing
+// interior (hi < 2), or non-positive spacing is `BadStep`.
+//
+// Field-location discipline: velocity lives at NODES (the [f64; N]
+// profile, walls included); momentum flux lives at FACES between
+// lanes (pairwise scalar function here — a whole-face array would be
+// a distinct length-N-1 type, kept scalar until a consumer needs the
+// array form). Arrays of equal length are never implicitly
+// interchangeable: the lane-index contract (`hi`) travels with every
+// kernel, following the FEM n_nodes pattern.
+
+module mncs.fluid.stencil1d.v1;
+
+// Outcome of the second-difference operator at one lane.
+enum DiffOut { Value { d2: f64 }, WallLane, BadIndex, BadSpacing }
+
+fn second_difference_at<N: Nat>(u: [f64; N], i: u64, hi: u64, h: f64) -> (result: DiffOut) {
+    if h <= 0.0 {
+        return DiffOut.BadSpacing;
+    }
+    if i == 0 {
+        return DiffOut.WallLane;
+    }
+    if i == hi {
+        return DiffOut.WallLane;
+    }
+    if i > hi {
+        return DiffOut.BadIndex;
+    }
+    return DiffOut.Value { d2: (u[i - 1] - 2.0 * u[i] + u[i + 1]) / (h * h) };
+}
+
+// Viscous momentum flux across the face between adjacent lanes
+// (u_lo below, u_hi above), in Pa, oriented +y. Antisymmetric by
+// construction: flux(mu, a, b, h) == -flux(mu, b, a, h).
+enum FluxOut { Value { flux: f64 }, BadInput }
+
+fn face_flux(viscosity: f64, u_lo: f64, u_hi: f64, h: f64) -> (result: FluxOut) {
+    if viscosity <= 0.0 {
+        return FluxOut.BadInput;
+    }
+    if h <= 0.0 {
+        return FluxOut.BadInput;
+    }
+    return FluxOut.Value { flux: 0.0 - viscosity * (u_hi - u_lo) / h };
+}
+
+// Diffusion number r = nu*dt/h² (dimensionless). Guards make a
+// meaningless step (non-positive dt or spacing, non-positive nu)
+// structured data instead of a trapping division.
+enum Rout { Value { r: f64 }, BadStep }
+
+fn diffusion_number(nu: f64, dt: f64, h: f64) -> (result: Rout) {
+    if nu <= 0.0 {
+        return Rout.BadStep;
+    }
+    if dt <= 0.0 {
+        return Rout.BadStep;
+    }
+    if h <= 0.0 {
+        return Rout.BadStep;
+    }
+    return Rout.Value { r: nu * dt / (h * h) };
+}
+
+// Explicit-diffusion stability verdict for a diffusion number:
+// stable for 0 < r <= 1/2, unstable above. r <= 0 never reaches here
+// through `explicit_step` (it is BadStep); direct callers pass only
+// positive r.
+enum Stability { Stable, Unstable }
+
+fn check_stability(r: f64) -> (result: Stability) {
+    if r <= stability_limit() {
+        return Stability.Stable;
+    }
+    return Stability.Unstable;
+}
+
+// One explicit FTCS step is a validated precondition plus a total
+// kernel. `check_step` is the data outcome (callers MUST consult it
+// before calling the kernel); `explicit_step_values` is the bare
+// total kernel, generic over the profile length, whose contract is
+// `check_step(r, hi) == Ok`. An `Unstable` verdict together with the
+// caller-held `(r, hi)` and the named `stability_limit()` is the
+// structured stability evidence. The split exists because outcome
+// enums cannot carry length-generic arrays in the current language
+// (pressure P-FLUID-FIELD): validation is data, the kernel is generic.
+enum StepCheck { Ok, Unstable, BadStep }
+
+// The explicit-diffusion stability limit: r <= stability_limit().
+// Named once so no call site hardcodes 1/2 without explanation.
+fn stability_limit() -> (result: f64) {
+    return 0.5;
+}
+
+fn check_step(r: f64, hi: u64) -> (result: StepCheck) {
+    if r <= 0.0 {
+        return StepCheck.BadStep;
+    }
+    if hi < 2 {
+        return StepCheck.BadStep;
+    }
+    return match check_stability(r) {
+        Stability.Stable => StepCheck.Ok,
+        Stability.Unstable => StepCheck.Unstable,
+    };
+}
+
+fn step_is_ok(c: StepCheck) -> (result: bool) {
+    return match c {
+        StepCheck.Ok => true,
+        StepCheck.Unstable => false,
+        StepCheck.BadStep => false,
+    };
+}
+
+fn explicit_step_values<N: Nat>(u: [f64; N], hi: u64, r: f64, src: f64) -> (result: [f64; N]) {
+    return step_lanes(u, hi, r, src);
+}
+
+// Interior update with walls pinned: lane 0 and lane hi keep their
+// Dirichlet values; every interior lane takes the FTCS update plus
+// the momentum source src = dt*G/rho. Reads use the OLD profile;
+// writes land in the carried copy, so update order cannot matter
+// (deterministic under traversal order by construction).
+fn step_lanes<N: Nat>(u: [f64; N], hi: u64, r: f64, src: f64) -> (result: [f64; N]) {
+    iterate i over u carrying next_u: [f64; N] = u {
+        next next_u = replace(next_u, i, lane_step(u, i, hi, r, src));
+    }
+    return next_u;
+}
+
+fn lane_step<N: Nat>(u: [f64; N], i: u64, hi: u64, r: f64, src: f64) -> (result: f64) {
+    if i == 0 {
+        return u[i];
+    }
+    if i == hi {
+        return u[i];
+    }
+    if i > hi {
+        return u[i];
+    }
+    return u[i] + r * (u[i - 1] - 2.0 * u[i] + u[i + 1]) + src;
+}
+
+// Fixed-count transient drivers over the whole profile: 8 steps
+// (short-horizon probe) and 32 steps (approach-to-steady driver).
+// Counts are declared computation bounds, generic over the profile
+// length; the caller contract is `check_step(r, hi) == Ok`. A 128-step
+// horizon composes as four nested 32-blocks at the model layer where
+// a concrete outcome type can name the result.
+fn run_steps_8_values<N: Nat>(u0: [f64; N], hi: u64, r: f64, src: f64) -> (result: [f64; N]) {
+    iterate s up_to 8 carrying u: [f64; N] = u0 {
+        next u = explicit_step_values(u, hi, r, src);
+    }
+    return u;
+}
+
+fn run_steps_32_values<N: Nat>(u0: [f64; N], hi: u64, r: f64, src: f64) -> (result: [f64; N]) {
+    iterate s up_to 32 carrying u: [f64; N] = u0 {
+        next u = explicit_step_values(u, hi, r, src);
+    }
+    return u;
+}
+
+// Simulation clock: physical time t (s) plus integer step count.
+// This is DOMAIN time carried as data, not wall-clock time: no
+// clock is read, no timezone exists here (automation calendars are a
+// different problem; pressure notes record the boundary).
+record SimClock { t: f64, step: u64 }
+
+fn sim_clock(t: f64, step: u64) -> (result: SimClock) {
+    return SimClock { t: t, step: step };
+}
+
+fn initial_clock() -> (result: SimClock) {
+    return SimClock { t: 0.0, step: 0 };
+}
+
+// Advance the clock by dt > 0. A non-positive dt is `BadDt` data:
+// time never runs backward or stands still through this function.
+enum ClockOut { Value { clock: SimClock }, BadDt }
+
+fn advance_clock(c: SimClock, dt: f64) -> (result: ClockOut) {
+    if dt <= 0.0 {
+        return ClockOut.BadDt;
+    }
+    return ClockOut.Value { clock: SimClock { t: c.t + dt, step: c.step + 1 } };
+}
+
+// Clock after a fixed block of `steps` constant-dt steps from rest:
+// t = steps*dt, step = steps. Closed form (no loop needed): the
+// result must equal folding `advance_clock` steps times, which the
+// suite pins for the verification horizons.
+fn clock_after_steps(dt: f64, steps: u64) -> (result: ClockOut) {
+    if dt <= 0.0 {
+        return ClockOut.BadDt;
+    }
+    return ClockOut.Value { clock: SimClock { t: dt * (steps as f64), step: steps } };
+}
+
+// Timestep implied by a diffusion number: dt = r*h²/nu. Guards mirror
+// `diffusion_number` so dt construction and r validation agree.
+enum DtOut { Value { dt: f64 }, BadStep }
+
+fn timestep_from_r(nu: f64, h: f64, r: f64) -> (result: DtOut) {
+    if nu <= 0.0 {
+        return DtOut.BadStep;
+    }
+    if h <= 0.0 {
+        return DtOut.BadStep;
+    }
+    if r <= 0.0 {
+        return DtOut.BadStep;
+    }
+    return DtOut.Value { dt: r * h * h / nu };
+}
+
+// Momentum source per step: src = dt*G/rho. Total on finite inputs
+// past the caller-owned validation (density comes from checked
+// props, dt from `timestep_from_r`).
+fn step_source(dt: f64, gradient: f64, density: f64) -> (result: f64) {
+    return dt * gradient / density;
+}

@@ -1,0 +1,83 @@
+mncs 0.18;
+
+// mncs.fluid.props.v1 — fluid material properties and dimensionless groups.
+//
+// Units are SI per field, stated beside each constructor:
+//   density   — kg/m^3 (mass per volume)
+//   viscosity — Pa·s = kg/(m·s) (dynamic viscosity mu)
+// Kinematic viscosity nu = mu/rho is m^2/s. Reynolds number is
+// dimensionless. MNCS provides no reusable dimensional-analysis
+// system today, so units live in these documented contracts rather
+// than in the type system (pressure P-FLUID-UNITS). What the types
+// DO enforce: positivity of density/viscosity is a structured
+// outcome (`PropCheck`), never a silent NaN or a trap.
+//
+// Only what the implemented formulation needs is modeled: constant
+// Newtonian properties for incompressible laminar flow. No
+// compressibility parameters, no temperature/energy/species state.
+
+module mncs.fluid.props.v1;
+
+// Constant Newtonian fluid properties: density (kg/m^3) and dynamic
+// viscosity (Pa·s). Both must be positive for the implemented model.
+record FluidProps { density: f64, viscosity: f64 }
+
+fn fluid_props(density: f64, viscosity: f64) -> (result: FluidProps) {
+    return FluidProps { density: density, viscosity: viscosity };
+}
+
+// Outcome of validating properties for incompressible Newtonian flow.
+enum PropCheck { Ok, BadDensity, BadViscosity }
+
+fn check_props(p: FluidProps) -> (result: PropCheck) {
+    if p.density <= 0.0 {
+        return PropCheck.BadDensity;
+    }
+    if p.viscosity <= 0.0 {
+        return PropCheck.BadViscosity;
+    }
+    return PropCheck.Ok;
+}
+
+fn props_are_ok(c: PropCheck) -> (result: bool) {
+    return match c {
+        PropCheck.Ok => true,
+        PropCheck.BadDensity => false,
+        PropCheck.BadViscosity => false,
+    };
+}
+
+// Kinematic viscosity nu = mu/rho in m^2/s. The division executes
+// only after both positivity guards pass, so zero density can never
+// trap here; it is `BadProps` data instead.
+enum NuOut { Value { nu: f64 }, BadProps }
+
+fn kinematic_viscosity(p: FluidProps) -> (result: NuOut) {
+    return match check_props(p) {
+        PropCheck.Ok => NuOut.Value { nu: p.viscosity / p.density },
+        PropCheck.BadDensity => NuOut.BadProps,
+        PropCheck.BadViscosity => NuOut.BadProps,
+    };
+}
+
+// Reynolds number Re = rho*U*L/mu (dimensionless). `speed` is a
+// magnitude (U >= 0); reversed flow carries its sign in the velocity
+// field, not in Re. All four guards make an unphysical regime
+// structured `BadInput` rather than a trapping division.
+enum ReOut { Value { re: f64 }, BadInput }
+
+fn reynolds_number(density: f64, speed: f64, length: f64, viscosity: f64) -> (result: ReOut) {
+    if density <= 0.0 {
+        return ReOut.BadInput;
+    }
+    if speed < 0.0 {
+        return ReOut.BadInput;
+    }
+    if length <= 0.0 {
+        return ReOut.BadInput;
+    }
+    if viscosity <= 0.0 {
+        return ReOut.BadInput;
+    }
+    return ReOut.Value { re: density * speed * length / viscosity };
+}

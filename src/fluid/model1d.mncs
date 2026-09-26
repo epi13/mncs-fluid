@@ -1,0 +1,331 @@
+mncs 0.18;
+
+// mncs.fluid.model1d.v1 — end-to-end plane-Poiseuille channel models.
+//
+// Native formulation, discretization, and assembly run entirely in
+// MNCS; the ONLY external numerics are the language-provided float
+// operators and `mncs.numerics.scalar_float` (fabs/approx discipline,
+// consumed, never duplicated). There is no reference/hidden solver:
+// both the direct (Thomas) and iterative (Jacobi) steady solvers and
+// the explicit transient driver are native Fluid code proved against
+// the analytic comparators in poiseuille.
+//
+// Path per steady model (shown for 5 nodes; 3/9 identical):
+//
+//   props/grid validation -> spacing h -> steady source rhs = G*h²/mu
+//   -> Thomas solve -> wall embedding -> flow rate (trapezoid)
+//   -> wall shears (one-sided) -> wall-face fluxes -> conservation
+//   imbalance.
+//
+// Path per transient model: the same validation plus nu = mu/rho,
+// dt = r*h²/nu, src = dt*G/rho, `check_step` gate, 32 native steps
+// from the quiescent default initial state, closed-form clock.
+//
+// Closed-form checks (H = 2, G = 4, mu = 1, rho = 1):
+//   center u = G*H²/(8*mu) = 2, Q = G*H³/(12*mu) = 8/3,
+//   tau_wall = G*H/2 = 4, Re = rho*U_mean*H/mu = 8/3.
+//
+// Solver failure vs invalid model stay distinct: `BadInput` means
+// the physics/grid description is unphysical; `Singular` means a
+// well-posed description met a vanishing pivot; `Unstable` means a
+// well-posed transient was asked to run past the stability limit.
+// NaN/Inf can never be PRODUCED here (every division is guarded);
+// non-finite INPUTS trap at the first comparison (fail-fast).
+
+module mncs.fluid.model1d.v1;
+
+use mncs.fluid.props;
+use mncs.fluid.grid1d;
+use mncs.fluid.bc;
+use mncs.fluid.tridiag;
+use mncs.fluid.derived;
+use mncs.fluid.stencil1d;
+
+// ---- validated steady inputs: one record per size ----
+
+record Ready3 { gradient: f64, viscosity: f64, height: f64, h: f64, rhs: f64 }
+
+record Ready5 { gradient: f64, viscosity: f64, height: f64, h: f64, rhs: f64 }
+
+record Ready9 { gradient: f64, viscosity: f64, height: f64, h: f64, rhs: f64 }
+
+enum Ready { Value3 { v: Ready3 }, Value5 { v: Ready5 }, Value9 { v: Ready9 }, BadInput }
+
+fn steady_ready(gradient: f64, props: FluidProps, grid: ChannelGrid, cells_wanted: u64) -> (result: Ready) {
+    return match check_props(props) {
+        PropCheck.Ok => steady_ready_grid(gradient, props, grid, cells_wanted),
+        PropCheck.BadDensity => Ready.BadInput,
+        PropCheck.BadViscosity => Ready.BadInput,
+    };
+}
+
+fn steady_ready_grid(gradient: f64, props: FluidProps, grid: ChannelGrid, cells_wanted: u64) -> (result: Ready) {
+    if grid_is_ok(check_grid(grid)) == false {
+        return Ready.BadInput;
+    }
+    if grid.cells != cells_wanted {
+        return Ready.BadInput;
+    }
+    return match cell_width(grid) {
+        Spacing.Value { h } => steady_ready_h(gradient, props, grid, h, cells_wanted),
+        Spacing.BadGrid => Ready.BadInput,
+    };
+}
+
+fn steady_ready_h(gradient: f64, props: FluidProps, grid: ChannelGrid, h: f64, cells_wanted: u64) -> (result: Ready) {
+    return match steady_rhs_value(gradient, h, props.viscosity) {
+        RhsOut.Value { rhs } => ready_for_cells(gradient, props, grid, h, rhs, cells_wanted),
+        RhsOut.BadInput => Ready.BadInput,
+    };
+}
+
+fn ready_for_cells(gradient: f64, props: FluidProps, grid: ChannelGrid, h: f64, rhs: f64, cells_wanted: u64) -> (result: Ready) {
+    if cells_wanted == 2 {
+        return Ready.Value3 { v: Ready3 { gradient: gradient, viscosity: props.viscosity, height: grid.height, h: h, rhs: rhs } };
+    }
+    if cells_wanted == 4 {
+        return Ready.Value5 { v: Ready5 { gradient: gradient, viscosity: props.viscosity, height: grid.height, h: h, rhs: rhs } };
+    }
+    if cells_wanted == 8 {
+        return Ready.Value9 { v: Ready9 { gradient: gradient, viscosity: props.viscosity, height: grid.height, h: h, rhs: rhs } };
+    }
+    return Ready.BadInput;
+}
+
+// ---- steady 3-node profile (1 interior lane) ----
+
+enum Channel3 { Value { u0: f64, u1: f64, u2: f64, flow_rate: f64, shear_lo: f64, shear_hi: f64, imbalance: f64 }, BadInput, Singular }
+
+fn solve_channel_3(gradient: f64, props: FluidProps, grid: ChannelGrid) -> (result: Channel3) {
+    return match steady_ready(gradient, props, grid, 2) {
+        Ready.Value3 { v } => solve_channel_3_ready(v),
+        Ready.Value5 { v } => Channel3.BadInput,
+        Ready.Value9 { v } => Channel3.BadInput,
+        Ready.BadInput => Channel3.BadInput,
+    };
+}
+
+fn solve_channel_3_ready(v: Ready3) -> (result: Channel3) {
+    return match thomas_1(poiseuille_triple(), v.rhs) {
+        Solve1.Value { x0 } => finish_channel_3(v, 0.0, x0, 0.0),
+        Solve1.ZeroPivot => Channel3.Singular,
+    };
+}
+
+fn finish_channel_3(v: Ready3, w0: f64, x0: f64, w1: f64) -> (result: Channel3) {
+    let prof: [f64; 3] = [w0, x0, w1];
+    return match flow_rate_value(trap_sum_values(prof, 2), v.h) {
+        RateOut.Value { q } => finish_shear_3(v, w0, x0, w1, q),
+        RateOut.BadInput => Channel3.BadInput,
+    };
+}
+
+fn finish_shear_3(v: Ready3, w0: f64, x0: f64, w1: f64, q: f64) -> (result: Channel3) {
+    return match wall_shear_lo_value(v.viscosity, w0, x0, v.h) {
+        ShearOut.Value { tau } => finish_shear_hi_3(v, x0, w1, q, tau),
+        ShearOut.BadInput => Channel3.BadInput,
+    };
+}
+
+fn finish_shear_hi_3(v: Ready3, x0: f64, w1: f64, q: f64, slo: f64) -> (result: Channel3) {
+    return match wall_shear_hi_value(v.viscosity, x0, w1, v.h) {
+        ShearOut.Value { tau } => finish_flux_3(v, x0, q, slo, tau),
+        ShearOut.BadInput => Channel3.BadInput,
+    };
+}
+
+fn finish_flux_3(v: Ready3, x0: f64, q: f64, slo: f64, shi: f64) -> (result: Channel3) {
+    return match face_flux(v.viscosity, 0.0, x0, v.h) {
+        FluxOut.Value { flux } => finish_flux_hi_3(v, x0, q, slo, shi, flux),
+        FluxOut.BadInput => Channel3.BadInput,
+    };
+}
+
+fn finish_flux_hi_3(v: Ready3, x0: f64, q: f64, slo: f64, shi: f64, fb: f64) -> (result: Channel3) {
+    return match face_flux(v.viscosity, x0, 0.0, v.h) {
+        FluxOut.Value { flux } => finish_imbalance_3(x0, q, slo, shi, fb, flux, v),
+        FluxOut.BadInput => Channel3.BadInput,
+    };
+}
+
+fn finish_imbalance_3(x0: f64, q: f64, slo: f64, shi: f64, fb: f64, ft: f64, v: Ready3) -> (result: Channel3) {
+    let imb: f64 = conservation_imbalance_value(fb, ft, v.gradient, interior_span_value(1, v.h));
+    return Channel3.Value { u0: 0.0, u1: x0, u2: 0.0, flow_rate: q, shear_lo: slo, shear_hi: shi, imbalance: imb };
+}
+
+// ---- steady 5-node profile (3 interior lanes) ----
+
+enum Channel5 { Value { u: [f64; 5], flow_rate: f64, shear_lo: f64, shear_hi: f64, imbalance: f64 }, BadInput, Singular }
+
+fn solve_channel_5(gradient: f64, props: FluidProps, grid: ChannelGrid) -> (result: Channel5) {
+    return match steady_ready(gradient, props, grid, 4) {
+        Ready.Value5 { v } => solve_channel_5_ready(v),
+        Ready.Value3 { v } => Channel5.BadInput,
+        Ready.Value9 { v } => Channel5.BadInput,
+        Ready.BadInput => Channel5.BadInput,
+    };
+}
+
+fn solve_channel_5_ready(v: Ready5) -> (result: Channel5) {
+    return match thomas_3(poiseuille_triple(), [v.rhs, v.rhs, v.rhs]) {
+        Solve3.Value { x } => finish_channel_5(v, [0.0, x[0], x[1], x[2], 0.0]),
+        Solve3.ZeroPivot => Channel5.Singular,
+    };
+}
+
+fn finish_channel_5(v: Ready5, u: [f64; 5]) -> (result: Channel5) {
+    return match flow_rate_value(trap_sum_values(u, 4), v.h) {
+        RateOut.Value { q } => finish_shear_5(v, u, q),
+        RateOut.BadInput => Channel5.BadInput,
+    };
+}
+
+fn finish_shear_5(v: Ready5, u: [f64; 5], q: f64) -> (result: Channel5) {
+    return match wall_shear_lo_value(v.viscosity, u[0], u[1], v.h) {
+        ShearOut.Value { tau } => finish_shear_hi_5(v, u, q, tau),
+        ShearOut.BadInput => Channel5.BadInput,
+    };
+}
+
+fn finish_shear_hi_5(v: Ready5, u: [f64; 5], q: f64, slo: f64) -> (result: Channel5) {
+    return match wall_shear_hi_value(v.viscosity, u[3], u[4], v.h) {
+        ShearOut.Value { tau } => finish_flux_5(v, u, q, slo, tau),
+        ShearOut.BadInput => Channel5.BadInput,
+    };
+}
+
+fn finish_flux_5(v: Ready5, u: [f64; 5], q: f64, slo: f64, shi: f64) -> (result: Channel5) {
+    return match face_flux(v.viscosity, u[0], u[1], v.h) {
+        FluxOut.Value { flux } => finish_flux_hi_5(v, u, q, slo, shi, flux),
+        FluxOut.BadInput => Channel5.BadInput,
+    };
+}
+
+fn finish_flux_hi_5(v: Ready5, u: [f64; 5], q: f64, slo: f64, shi: f64, fb: f64) -> (result: Channel5) {
+    return match face_flux(v.viscosity, u[3], u[4], v.h) {
+        FluxOut.Value { flux } => finish_imbalance_5(v, u, q, slo, shi, fb, flux),
+        FluxOut.BadInput => Channel5.BadInput,
+    };
+}
+
+fn finish_imbalance_5(v: Ready5, u: [f64; 5], q: f64, slo: f64, shi: f64, fb: f64, ft: f64) -> (result: Channel5) {
+    let imb: f64 = conservation_imbalance_value(fb, ft, v.gradient, interior_span_value(3, v.h));
+    return Channel5.Value { u: u, flow_rate: q, shear_lo: slo, shear_hi: shi, imbalance: imb };
+}
+
+// ---- steady 9-node profile (7 interior lanes) ----
+
+enum Channel9 { Value { u: [f64; 9], flow_rate: f64, shear_lo: f64, shear_hi: f64, imbalance: f64 }, BadInput, Singular }
+
+fn solve_channel_9(gradient: f64, props: FluidProps, grid: ChannelGrid) -> (result: Channel9) {
+    return match steady_ready(gradient, props, grid, 8) {
+        Ready.Value9 { v } => solve_channel_9_ready(v),
+        Ready.Value3 { v } => Channel9.BadInput,
+        Ready.Value5 { v } => Channel9.BadInput,
+        Ready.BadInput => Channel9.BadInput,
+    };
+}
+
+fn solve_channel_9_ready(v: Ready9) -> (result: Channel9) {
+    return match thomas_7(poiseuille_triple(), [v.rhs, v.rhs, v.rhs, v.rhs, v.rhs, v.rhs, v.rhs]) {
+        Solve7.Value { x } => finish_channel_9(v, [0.0, x[0], x[1], x[2], x[3], x[4], x[5], x[6], 0.0]),
+        Solve7.ZeroPivot => Channel9.Singular,
+    };
+}
+
+fn finish_channel_9(v: Ready9, u: [f64; 9]) -> (result: Channel9) {
+    return match flow_rate_value(trap_sum_values(u, 8), v.h) {
+        RateOut.Value { q } => finish_shear_9(v, u, q),
+        RateOut.BadInput => Channel9.BadInput,
+    };
+}
+
+fn finish_shear_9(v: Ready9, u: [f64; 9], q: f64) -> (result: Channel9) {
+    return match wall_shear_lo_value(v.viscosity, u[0], u[1], v.h) {
+        ShearOut.Value { tau } => finish_shear_hi_9(v, u, q, tau),
+        ShearOut.BadInput => Channel9.BadInput,
+    };
+}
+
+fn finish_shear_hi_9(v: Ready9, u: [f64; 9], q: f64, slo: f64) -> (result: Channel9) {
+    return match wall_shear_hi_value(v.viscosity, u[7], u[8], v.h) {
+        ShearOut.Value { tau } => finish_flux_9(v, u, q, slo, tau),
+        ShearOut.BadInput => Channel9.BadInput,
+    };
+}
+
+fn finish_flux_9(v: Ready9, u: [f64; 9], q: f64, slo: f64, shi: f64) -> (result: Channel9) {
+    return match face_flux(v.viscosity, u[0], u[1], v.h) {
+        FluxOut.Value { flux } => finish_flux_hi_9(v, u, q, slo, shi, flux),
+        FluxOut.BadInput => Channel9.BadInput,
+    };
+}
+
+fn finish_flux_hi_9(v: Ready9, u: [f64; 9], q: f64, slo: f64, shi: f64, fb: f64) -> (result: Channel9) {
+    return match face_flux(v.viscosity, u[7], u[8], v.h) {
+        FluxOut.Value { flux } => finish_imbalance_9(v, u, q, slo, shi, fb, flux),
+        FluxOut.BadInput => Channel9.BadInput,
+    };
+}
+
+fn finish_imbalance_9(v: Ready9, u: [f64; 9], q: f64, slo: f64, shi: f64, fb: f64, ft: f64) -> (result: Channel9) {
+    let imb: f64 = conservation_imbalance_value(fb, ft, v.gradient, interior_span_value(7, v.h));
+    return Channel9.Value { u: u, flow_rate: q, shear_lo: slo, shear_hi: shi, imbalance: imb };
+}
+
+// ---- transient 5-node run: 32 explicit steps from rest ----
+
+enum Transient5 { Value { u: [f64; 5], t: f64, steps: u64 }, BadInput, Unstable }
+
+fn run_channel_5(gradient: f64, props: FluidProps, grid: ChannelGrid, r: f64) -> (result: Transient5) {
+    return match check_props(props) {
+        PropCheck.Ok => run_channel_5_grid(gradient, props, grid, r),
+        PropCheck.BadDensity => Transient5.BadInput,
+        PropCheck.BadViscosity => Transient5.BadInput,
+    };
+}
+
+fn run_channel_5_grid(gradient: f64, props: FluidProps, grid: ChannelGrid, r: f64) -> (result: Transient5) {
+    if grid_is_ok(check_grid(grid)) == false {
+        return Transient5.BadInput;
+    }
+    if grid.cells != 4 {
+        return Transient5.BadInput;
+    }
+    return match check_step(r, 4) {
+        StepCheck.Ok => run_channel_5_ready(gradient, props, grid.height, r),
+        StepCheck.Unstable => Transient5.Unstable,
+        StepCheck.BadStep => Transient5.BadInput,
+    };
+}
+
+fn run_channel_5_ready(gradient: f64, props: FluidProps, height: f64, r: f64) -> (result: Transient5) {
+    return match cell_width(channel_grid(height, 4)) {
+        Spacing.Value { h } => run_channel_5_h(gradient, props, h, r),
+        Spacing.BadGrid => Transient5.BadInput,
+    };
+}
+
+fn run_channel_5_h(gradient: f64, props: FluidProps, h: f64, r: f64) -> (result: Transient5) {
+    return match kinematic_viscosity(props) {
+        NuOut.Value { nu } => run_channel_5_nu(gradient, props, h, r, nu),
+        NuOut.BadProps => Transient5.BadInput,
+    };
+}
+
+fn run_channel_5_nu(gradient: f64, props: FluidProps, h: f64, r: f64, nu: f64) -> (result: Transient5) {
+    return match timestep_from_r(nu, h, r) {
+        DtOut.Value { dt } => run_channel_5_dt(gradient, props, r, dt),
+        DtOut.BadStep => Transient5.BadInput,
+    };
+}
+
+fn run_channel_5_dt(gradient: f64, props: FluidProps, r: f64, dt: f64) -> (result: Transient5) {
+    let src: f64 = step_source(dt, gradient, props.density);
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let u: [f64; 5] = run_steps_32_values(rest, 4, r, src);
+    return match clock_after_steps(dt, 32) {
+        ClockOut.Value { clock } => Transient5.Value { u: u, t: clock.t, steps: clock.step },
+        ClockOut.BadDt => Transient5.BadInput,
+    };
+}

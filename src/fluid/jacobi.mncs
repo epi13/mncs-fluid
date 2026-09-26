@@ -1,0 +1,114 @@
+mncs 0.18;
+
+// mncs.fluid.jacobi.v1 — Jacobi iteration for the steady viscous system.
+//
+// The same interior system as tridiag (`-u[i-1]+2u[i]-u[i+1] = rhs`)
+// solved iteratively: each sweep replaces every interior lane by
+//
+//   x_new[i] = (x[i-1] + x[i+1] + rhs) / 2,
+//
+// reading the OLD profile throughout (Jacobi, not Gauss-Seidel), so
+// update order cannot matter. Walls stay pinned. This is the native
+// iterative-solver evidence layer the RFC requires: sweep counts are
+// fixed and bounded, residuals are first-class values, and
+// convergence is a checked predicate — never an unbounded loop and
+// never a bare "solver failed".
+//
+// Residual semantics (kept distinct):
+//   - algebraic residual res[i] = rhs - (2x[i]-x[i-1]-x[i+1]);
+//     `max_residual_values` reports its maximum absolute value;
+//   - physical conservation imbalance lives in derived/model, not here;
+//   - field update norms are not tracked: the residual is the contract.
+// The system is strictly diagonally dominant, so Jacobi converges
+// from any start; the contraction per sweep on these small grids is
+// approximately 1/2 (measured, not assumed, in the test corpus).
+
+module mncs.fluid.jacobi.v1;
+
+use mncs.numerics.scalar_float;
+
+// One Jacobi sweep over the whole profile, walls pinned. Bare total
+// kernel, generic over the profile length; the caller contract is
+// hi >= 2 with hi the last lane (walls at 0 and hi).
+fn jacobi_sweep_values<N: Nat>(x: [f64; N], hi: u64, rhs: f64) -> (result: [f64; N]) {
+    iterate i over x carrying next_x: [f64; N] = x {
+        next next_x = replace(next_x, i, jacobi_lane(x, i, hi, rhs));
+    }
+    return next_x;
+}
+
+fn jacobi_lane<N: Nat>(x: [f64; N], i: u64, hi: u64, rhs: f64) -> (result: f64) {
+    if i == 0 {
+        return x[i];
+    }
+    if i == hi {
+        return x[i];
+    }
+    if i > hi {
+        return x[i];
+    }
+    return (x[i - 1] + x[i + 1] + rhs) * 0.5;
+}
+
+// Fixed-count drivers: 8 sweeps (contraction probe), 32 sweeps
+// (engineering convergence on these grids), 128 sweeps (reference
+// convergence: 4 nested blocks of 32, two bounded levels). Counts are
+// part of the declared computation, not tuning hidden in a loop.
+fn jacobi_8_values<N: Nat>(x0: [f64; N], hi: u64, rhs: f64) -> (result: [f64; N]) {
+    iterate s up_to 8 carrying x: [f64; N] = x0 {
+        next x = jacobi_sweep_values(x, hi, rhs);
+    }
+    return x;
+}
+
+fn jacobi_32_values<N: Nat>(x0: [f64; N], hi: u64, rhs: f64) -> (result: [f64; N]) {
+    iterate s up_to 32 carrying x: [f64; N] = x0 {
+        next x = jacobi_sweep_values(x, hi, rhs);
+    }
+    return x;
+}
+
+fn jacobi_128_values<N: Nat>(x0: [f64; N], hi: u64, rhs: f64) -> (result: [f64; N]) {
+    iterate o up_to 4 carrying x: [f64; N] = x0 {
+        next x = jacobi_32_values(x, hi, rhs);
+    }
+    return x;
+}
+
+// Maximum absolute algebraic residual over interior lanes:
+// |rhs - (2x[i]-x[i-1]-x[i+1])|. Zero (up to rounding) at the exact
+// discrete solution; the suite pins residual decrease across drivers
+// and residual agreement between the direct and iterative solvers.
+fn max_residual_values<N: Nat>(x: [f64; N], hi: u64, rhs: f64) -> (result: f64) {
+    iterate i over x carrying m: f64 = 0.0 {
+        next m = residual_max_at(m, x, i, hi, rhs);
+    }
+    return m;
+}
+
+fn residual_max_at<N: Nat>(m: f64, x: [f64; N], i: u64, hi: u64, rhs: f64) -> (result: f64) {
+    if i == 0 {
+        return m;
+    }
+    if i == hi {
+        return m;
+    }
+    if i > hi {
+        return m;
+    }
+    let res: f64 = fabs(rhs - (2.0 * x[i] - x[i - 1] - x[i + 1]));
+    if res > m {
+        return res;
+    }
+    return m;
+}
+
+// Convergence predicate: res <= tol with a positive tolerance. A
+// non-positive tolerance never converges (structured false, not a
+// trap): tolerances are scale-aware caller data, documented per call.
+fn residual_converged(res: f64, tol: f64) -> (result: bool) {
+    if tol <= 0.0 {
+        return false;
+    }
+    return res <= tol;
+}

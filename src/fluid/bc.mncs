@@ -1,0 +1,88 @@
+mncs 0.18;
+
+// mncs.fluid.bc.v1 — fluid boundary and initial conditions as typed data.
+//
+// Boundary conditions are core Fluid semantics: they are explicit
+// variants resolved against lane identities (wall lanes 0/cells of a
+// `ChannelGrid`), never bare strings plus dictionaries. Human labels
+// ("inlet", "wall") may annotate a result, but the semantic identity
+// here is positional: which lane, which law.
+//
+// Sign convention (driving force): G = -dp/dx. G > 0 drives +x flow,
+// G < 0 is legitimate reversed flow, G == 0 is a legitimate
+// quiescent model whose solution is the zero field. Only the
+// implemented laws are representable: no-slip walls. Symmetry,
+// inlet/outlet, periodic, and prescribed-pressure boundaries are
+// deferred scope, not stringly-typed stubs.
+
+module mncs.fluid.bc.v1;
+
+// Wall momentum law. The foundation slice implements no-slip only:
+// the fluid velocity at a wall lane equals the wall velocity (zero
+// for stationary walls).
+enum WallLaw { NoSlip }
+
+// Both channel walls with their laws. Stationary no-slip on both
+// sides is the Poiseuille configuration; the record keeps the two
+// sides distinct so future laws (moving wall Couette, symmetry) have
+// a positional home.
+record ChannelWalls { lo: WallLaw, hi: WallLaw }
+
+fn channel_walls(lo: WallLaw, hi: WallLaw) -> (result: ChannelWalls) {
+    return ChannelWalls { lo: lo, hi: hi };
+}
+
+// Stationary-wall velocity in m/s for a law. Total: every
+// representable law maps to a value.
+fn wall_velocity(w: WallLaw) -> (result: f64) {
+    return match w {
+        WallLaw.NoSlip => 0.0,
+    };
+}
+
+// Uniform driving pressure gradient G = -dp/dx in Pa/m. Positive G
+// drives +x flow; the value is carried with its sign convention so
+// flux orientation checks have a fixed reference.
+record DrivingForce { gradient: f64 }
+
+fn driving_force(gradient: f64) -> (result: DrivingForce) {
+    return DrivingForce { gradient: gradient };
+}
+
+// True when the model is actually driven (nonzero gradient). A zero
+// gradient is valid physics (quiescent), not an error.
+fn is_driven(d: DrivingForce) -> (result: bool) {
+    return d.gradient != 0.0;
+}
+
+// Transient initial-condition kind. The foundation slice supports a
+// quiescent (zero-velocity) start; non-uniform initial profiles are
+// deferred scope.
+enum InitKind { Quiescent }
+
+// Whether the initial state was explicitly specified by the caller,
+// derived from a prior result, or defaulted by the model. A
+// defaulted zero field changes the physics silently if mistaken for
+// specified data, so the provenance travels with the value.
+enum InitSource { Specified, Derived, Defaulted }
+
+// Complete initial-state descriptor: what field and where it came from.
+record InitialState { kind: InitKind, source: InitSource }
+
+fn initial_state(kind: InitKind, source: InitSource) -> (result: InitialState) {
+    return InitialState { kind: kind, source: source };
+}
+
+// The conventional default: quiescent field, explicitly marked as
+// defaulted so no consumer mistakes it for specified data.
+fn default_initial_state() -> (result: InitialState) {
+    return InitialState { kind: InitKind.Quiescent, source: InitSource.Defaulted };
+}
+
+// Initial velocity value in m/s for a lane. Total over the
+// representable kinds.
+fn init_velocity(s: InitialState) -> (result: f64) {
+    return match s.kind {
+        InitKind.Quiescent => 0.0,
+    };
+}
