@@ -1,0 +1,53 @@
+mncs 0.18;
+
+// Native contracts for boundary/initial conditions: wall law values,
+// driving-force sign convention, and initial-state provenance.
+
+module mncs.fluid.test.bc.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.fluid.bc;
+
+test no_slip_wall_velocity_is_zero() -> (result: TestResult) {
+    let w: ChannelWalls = channel_walls(WallLaw.NoSlip, WallLaw.NoSlip);
+    let good: bool = wall_velocity(w.lo) == 0.0 && wall_velocity(w.hi) == 0.0;
+    return from_assertion(equals_bool(true, good, 6301));
+}
+
+test driving_force_sign_convention() -> (result: TestResult) {
+    // G > 0 drives +x flow; G < 0 is legitimate reversed flow kept
+    // with its sign; G == 0 is quiescent, not an error.
+    let fwd: DrivingForce = driving_force(4.0);
+    let rev: DrivingForce = driving_force(0.0 - 4.0);
+    let still: DrivingForce = driving_force(0.0);
+    let good: bool = fwd.gradient == 4.0 && rev.gradient == 0.0 - 4.0 && still.gradient == 0.0;
+    let driven: bool = is_driven(fwd) && is_driven(rev) && is_driven(still) == false;
+    return from_assertion(equals_bool(true, good && driven, 6302));
+}
+
+test default_initial_state_is_marked_defaulted() -> (result: TestResult) {
+    // The conventional zero start must never masquerade as specified data.
+    let s: InitialState = default_initial_state();
+    let quiescent: bool = match s.kind {
+        InitKind.Quiescent => true,
+    };
+    let defaulted: bool = match s.source {
+        InitSource.Specified => false,
+        InitSource.Derived => false,
+        InitSource.Defaulted => true,
+    };
+    let zero: bool = init_velocity(s) == 0.0;
+    return from_assertion(equals_bool(true, quiescent && defaulted && zero, 6303));
+}
+
+test specified_initial_state_keeps_provenance() -> (result: TestResult) {
+    let s: InitialState = initial_state(InitKind.Quiescent, InitSource.Specified);
+    let specified: bool = match s.source {
+        InitSource.Specified => true,
+        InitSource.Derived => false,
+        InitSource.Defaulted => false,
+    };
+    let zero: bool = init_velocity(s) == 0.0;
+    return from_assertion(equals_bool(true, specified && zero, 6304));
+}

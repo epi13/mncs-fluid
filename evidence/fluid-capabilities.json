@@ -1,0 +1,74 @@
+{
+  "capabilities": [
+    "typed fluid properties with positivity validation",
+    "1D channel grid with wall/interior lane identity",
+    "no-slip walls, driving-gradient sign convention, IC provenance",
+    "analytic plane-Poiseuille comparators",
+    "guarded second-difference, oriented face flux, FTCS step",
+    "explicit-diffusion stability gate with structured evidence",
+    "native Thomas direct solve with ZeroPivot structure",
+    "native Jacobi iteration with residual and fixed-count drivers",
+    "trapezoidal flow rate, one-sided wall shear, conservation imbalance",
+    "end-to-end steady models on 3 grids plus 32-step transient model",
+    "simulation time as data (SimClock), distinct from wall-clock"
+  ],
+  "doc": "docs/FLUID_MODEL.md",
+  "formulation": {
+    "assumptions": [
+      "incompressible",
+      "Newtonian with constant properties",
+      "steady fully developed laminar channel flow (steady path)",
+      "no-slip stationary walls",
+      "uniform driving pressure gradient",
+      "entrance effects neglected"
+    ],
+    "equation": "mu d2u/dy2 = -G, u(0) = u(H) = 0",
+    "solution": "u(y) = G/(2 mu) y (H - y)",
+    "transient": "rho du/dt = mu d2u/dy2 + G, explicit FTCS, r <= 1/2"
+  },
+  "history": [
+    "bootstrap: architecture docs only, no implementation",
+    "foundation: first canonical native implementation (this revision)"
+  ],
+  "implementation": "first and only canonical implementation; no v1/v2 forks, no native-fluid split, no compatibility layers",
+  "language": "mncs 0.18",
+  "modules": [
+    "mncs.fluid.props.v1",
+    "mncs.fluid.grid1d.v1",
+    "mncs.fluid.bc.v1",
+    "mncs.fluid.poiseuille.v1",
+    "mncs.fluid.stencil1d.v1",
+    "mncs.fluid.tridiag.v1",
+    "mncs.fluid.jacobi.v1",
+    "mncs.fluid.derived.v1",
+    "mncs.fluid.model1d.v1"
+  ],
+  "native_coverage": "formulation, discretization, both solvers, drivers, derived quantities, and verification are MNCS-native; only float operators and scalar discipline are consumed from language/numerics",
+  "numeric_discipline": "exact == on dyadic values; approx with stated tolerances (1e-15 analytic, 1e-12 solvers, 1e-9 refinement ratios, 0.05 transient approach); every division guarded; non-finite inputs fail fast by the language trap rule",
+  "out_of_scope": [
+    "turbulence",
+    "compressibility",
+    "multiphase",
+    "pressure-velocity coupling",
+    "FEM-based formulations",
+    "2D/3D meshes",
+    "parallel execution",
+    "generic solvers",
+    "private units system"
+  ],
+  "pressures": {
+    "P-FLUID-FIELD": "length-generic outcome types (blocking for generality)",
+    "P-FLUID-MESH": "generic mesh topology home (non-blocking)",
+    "P-FLUID-SOLVER": "generic sparse/iterative solver home (non-blocking at 1D)",
+    "P-FLUID-UNITS": "dimensional analysis (non-blocking)"
+  },
+  "schema_version": "mncs-fluid.capabilities/1",
+  "solver_boundary": "native formulation/discretization/Thomas/Jacobi/transient drivers; no reference backend bridge; generic solvers remain external pressure",
+  "status": "foundation slice operational",
+  "unknowns": [],
+  "verification": {
+    "native_tests": 74,
+    "oracle_checks": 48,
+    "suites": ["props", "grid1d", "bc", "poiseuille", "stencil1d", "tridiag", "jacobi", "derived", "model1d"]
+  }
+}

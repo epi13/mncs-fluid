@@ -1,0 +1,179 @@
+mncs 0.18;
+
+// mncs.fluid.tridiag.v1 — Thomas algorithm for the uniform-grid
+// steady viscous system.
+//
+// The steady discretization on interior lanes reads
+//
+//   -u[i-1] + 2u[i] - u[i+1] = rhs,   rhs = G*h²/mu (uniform),
+//
+// a constant-coefficient tridiagonal system: subdiagonal a = -1,
+// diagonal b = 2, superdiagonal c = -1 at every lane. This module
+// solves exactly that structure — it is NOT a generic tridiagonal
+// solver (variable-coefficient systems are out of scope; the missing
+// generic sparse/direct solver is pressure P-FLUID-SOLVER, not
+// capability claimed here). Coefficients travel as data
+// (`Tridiag3`) so degenerate triples (b = 0, vanishing pivots) are
+// structured `ZeroPivot` outcomes, never traps.
+//
+// Forward elimination then back substitution run as bounded forward
+// traversals with carried records (the backward pass walks rev = hi
+// - i over a forward index). Every lane is written exactly once from
+// a fully seeded exemplar; the seeds are overwritten, never read.
+//
+// Mathematical term -> implemented term:
+//   -u[i-1]+2u[i]-u[i+1]  ->  interior_equation LHS via (a,b,c)
+//   G*h²/mu               ->  steady_rhs_value
+//   forward c'[i],d'[i]   ->  FwdN.cp/dp lanes
+//   back-substituted x    ->  BwdN.x lanes
+
+module mncs.fluid.tridiag.v1;
+
+// Constant tridiagonal triple: subdiagonal a, diagonal b,
+// superdiagonal c. For the uniform second difference: (-1, 2, -1).
+record Tridiag3 { a: f64, b: f64, c: f64 }
+
+fn poiseuille_triple() -> (result: Tridiag3) {
+    return Tridiag3 { a: 0.0 - 1.0, b: 2.0, c: 0.0 - 1.0 };
+}
+
+// Uniform steady source rhs = G*h²/mu per interior lane: the pressure
+// term G (Pa/m) scaled by h²/mu. Guards make an unphysical regime
+// structured `BadInput`; the divisions that follow can never trap on
+// an accepted input.
+enum RhsOut { Value { rhs: f64 }, BadInput }
+
+fn steady_rhs_value(gradient: f64, h: f64, viscosity: f64) -> (result: RhsOut) {
+    if h <= 0.0 {
+        return RhsOut.BadInput;
+    }
+    if viscosity <= 0.0 {
+        return RhsOut.BadInput;
+    }
+    return RhsOut.Value { rhs: gradient * h * h / viscosity };
+}
+
+// ---- 1 interior lane (3-node profile) ----
+
+enum Solve1 { Value { x0: f64 }, ZeroPivot }
+
+fn thomas_1(t: Tridiag3, rhs0: f64) -> (result: Solve1) {
+    if t.b == 0.0 {
+        return Solve1.ZeroPivot;
+    }
+    return Solve1.Value { x0: rhs0 / t.b };
+}
+
+// ---- 3 interior lanes (5-node profile) ----
+
+record Fwd3 { cp: [f64; 3], dp: [f64; 3], c_prev: f64, d_prev: f64, ok: bool }
+
+record Bwd3 { x: [f64; 3], x_next: f64 }
+
+enum Solve3 { Value { x: [f64; 3] }, ZeroPivot }
+
+fn thomas_3(t: Tridiag3, rhs: [f64; 3]) -> (result: Solve3) {
+    let fwd: Fwd3 = fwd_pass_3(t, rhs);
+    if fwd.ok == false {
+        return Solve3.ZeroPivot;
+    }
+    return Solve3.Value { x: bwd_pass_3(fwd) };
+}
+
+fn fwd_pass_3(t: Tridiag3, rhs: [f64; 3]) -> (result: Fwd3) {
+    iterate i over rhs carrying st: Fwd3 = Fwd3 { cp: rhs, dp: rhs, c_prev: 0.0, d_prev: 0.0, ok: true } {
+        next st = fwd_lane_3(st, t, rhs, i);
+    }
+    return st;
+}
+
+fn fwd_lane_3(st: Fwd3, t: Tridiag3, rhs: [f64; 3], i: u64) -> (result: Fwd3) {
+    if st.ok == false {
+        return st;
+    }
+    if i == 0 {
+        if t.b == 0.0 {
+            return Fwd3 { cp: st.cp, dp: st.dp, c_prev: st.c_prev, d_prev: st.d_prev, ok: false };
+        }
+        let c0: f64 = t.c / t.b;
+        let d0: f64 = rhs[0] / t.b;
+        return Fwd3 { cp: replace(st.cp, 0, c0), dp: replace(st.dp, 0, d0), c_prev: c0, d_prev: d0, ok: true };
+    }
+    let denom: f64 = t.b - t.a * st.c_prev;
+    if denom == 0.0 {
+        return Fwd3 { cp: st.cp, dp: st.dp, c_prev: st.c_prev, d_prev: st.d_prev, ok: false };
+    }
+    let cp_i: f64 = t.c / denom;
+    let dp_i: f64 = (rhs[i] - t.a * st.d_prev) / denom;
+    return Fwd3 { cp: replace(st.cp, i, cp_i), dp: replace(st.dp, i, dp_i), c_prev: cp_i, d_prev: dp_i, ok: true };
+}
+
+fn bwd_pass_3(fwd: Fwd3) -> (result: [f64; 3]) {
+    iterate i over fwd.dp carrying st: Bwd3 = Bwd3 { x: fwd.dp, x_next: 0.0 } {
+        next st = bwd_lane_3(st, fwd, i);
+    }
+    return st.x;
+}
+
+fn bwd_lane_3(st: Bwd3, fwd: Fwd3, i: u64) -> (result: Bwd3) {
+    let rev: u64 = 2 - i;
+    let v: f64 = fwd.dp[rev] - fwd.cp[rev] * st.x_next;
+    return Bwd3 { x: replace(st.x, rev, v), x_next: v };
+}
+
+// ---- 7 interior lanes (9-node profile) ----
+
+record Fwd7 { cp: [f64; 7], dp: [f64; 7], c_prev: f64, d_prev: f64, ok: bool }
+
+record Bwd7 { x: [f64; 7], x_next: f64 }
+
+enum Solve7 { Value { x: [f64; 7] }, ZeroPivot }
+
+fn thomas_7(t: Tridiag3, rhs: [f64; 7]) -> (result: Solve7) {
+    let fwd: Fwd7 = fwd_pass_7(t, rhs);
+    if fwd.ok == false {
+        return Solve7.ZeroPivot;
+    }
+    return Solve7.Value { x: bwd_pass_7(fwd) };
+}
+
+fn fwd_pass_7(t: Tridiag3, rhs: [f64; 7]) -> (result: Fwd7) {
+    iterate i over rhs carrying st: Fwd7 = Fwd7 { cp: rhs, dp: rhs, c_prev: 0.0, d_prev: 0.0, ok: true } {
+        next st = fwd_lane_7(st, t, rhs, i);
+    }
+    return st;
+}
+
+fn fwd_lane_7(st: Fwd7, t: Tridiag3, rhs: [f64; 7], i: u64) -> (result: Fwd7) {
+    if st.ok == false {
+        return st;
+    }
+    if i == 0 {
+        if t.b == 0.0 {
+            return Fwd7 { cp: st.cp, dp: st.dp, c_prev: st.c_prev, d_prev: st.d_prev, ok: false };
+        }
+        let c0: f64 = t.c / t.b;
+        let d0: f64 = rhs[0] / t.b;
+        return Fwd7 { cp: replace(st.cp, 0, c0), dp: replace(st.dp, 0, d0), c_prev: c0, d_prev: d0, ok: true };
+    }
+    let denom: f64 = t.b - t.a * st.c_prev;
+    if denom == 0.0 {
+        return Fwd7 { cp: st.cp, dp: st.dp, c_prev: st.c_prev, d_prev: st.d_prev, ok: false };
+    }
+    let cp_i: f64 = t.c / denom;
+    let dp_i: f64 = (rhs[i] - t.a * st.d_prev) / denom;
+    return Fwd7 { cp: replace(st.cp, i, cp_i), dp: replace(st.dp, i, dp_i), c_prev: cp_i, d_prev: dp_i, ok: true };
+}
+
+fn bwd_pass_7(fwd: Fwd7) -> (result: [f64; 7]) {
+    iterate i over fwd.dp carrying st: Bwd7 = Bwd7 { x: fwd.dp, x_next: 0.0 } {
+        next st = bwd_lane_7(st, fwd, i);
+    }
+    return st.x;
+}
+
+fn bwd_lane_7(st: Bwd7, fwd: Fwd7, i: u64) -> (result: Bwd7) {
+    let rev: u64 = 6 - i;
+    let v: f64 = fwd.dp[rev] - fwd.cp[rev] * st.x_next;
+    return Bwd7 { x: replace(st.x, rev, v), x_next: v };
+}

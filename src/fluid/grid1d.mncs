@@ -1,0 +1,108 @@
+mncs 0.18;
+
+// mncs.fluid.grid1d.v1 — cross-channel grid for 1D channel flow.
+//
+// A `ChannelGrid` spans y in [0, height] with `cells` uniform control
+// intervals, hence `cells + 1` nodes at y_i = i*h, h = height/cells.
+// Node 0 and node `cells` are the walls; interior lanes 1..cells-1
+// carry the velocity unknowns. Identity is the lane index, never the
+// coordinate (cf. FEM mesh1d): two lanes never share a coordinate on
+// a valid grid, and connectivity is positional, not named.
+//
+// This is a Fluid-owned discretization descriptor, not a generic
+// mesh: it knows walls, interiors, and faces of one channel slice.
+// Generic unstructured-mesh topology remains a separate pressure
+// (P-FLUID-MESH), not capability claimed here.
+
+module mncs.fluid.grid1d.v1;
+
+// Cross-channel grid: height H in metres, `cells` uniform intervals.
+// Nodes = cells + 1 (walls at lanes 0 and cells).
+record ChannelGrid { height: f64, cells: u64 }
+
+fn channel_grid(height: f64, cells: u64) -> (result: ChannelGrid) {
+    return ChannelGrid { height: height, cells: cells };
+}
+
+// Outcome of validating a grid: positive span and at least one cell
+// (one cell = two walls joined by a single interior lane).
+enum GridCheck { Ok, BadHeight, BadCells }
+
+fn check_grid(g: ChannelGrid) -> (result: GridCheck) {
+    if g.height <= 0.0 {
+        return GridCheck.BadHeight;
+    }
+    if g.cells < 1 {
+        return GridCheck.BadCells;
+    }
+    return GridCheck.Ok;
+}
+
+fn grid_is_ok(c: GridCheck) -> (result: bool) {
+    return match c {
+        GridCheck.Ok => true,
+        GridCheck.BadHeight => false,
+        GridCheck.BadCells => false,
+    };
+}
+
+// Uniform cell width h = height/cells in metres. The divisor is
+// guarded nonzero by `check_grid`, so no trap is reachable.
+enum Spacing { Value { h: f64 }, BadGrid }
+
+fn cell_width(g: ChannelGrid) -> (result: Spacing) {
+    return match check_grid(g) {
+        GridCheck.Ok => Spacing.Value { h: g.height / (g.cells as f64) },
+        GridCheck.BadHeight => Spacing.BadGrid,
+        GridCheck.BadCells => Spacing.BadGrid,
+    };
+}
+
+// Coordinate of lane i in metres. Valid lanes are 0..=cells; the
+// walls are lanes 0 and cells exactly.
+enum NodeY { Value { y: f64 }, BadIndex, BadGrid }
+
+fn node_y(g: ChannelGrid, i: u64) -> (result: NodeY) {
+    return match check_grid(g) {
+        GridCheck.Ok => node_y_guarded(g, i),
+        GridCheck.BadHeight => NodeY.BadGrid,
+        GridCheck.BadCells => NodeY.BadGrid,
+    };
+}
+
+fn node_y_guarded(g: ChannelGrid, i: u64) -> (result: NodeY) {
+    if i > g.cells {
+        return NodeY.BadIndex;
+    }
+    return match cell_width(g) {
+        Spacing.Value { h } => NodeY.Value { y: (i as f64) * h },
+        Spacing.BadGrid => NodeY.BadGrid,
+    };
+}
+
+// True for wall lanes (0 and cells) on a valid grid; false for
+// interior lanes. Out-of-range lanes and invalid grids are not
+// walls — they are nothing, reported by `node_y` instead.
+fn is_wall_lane(g: ChannelGrid, i: u64) -> (result: bool) {
+    if grid_is_ok(check_grid(g)) == false {
+        return false;
+    }
+    if i > g.cells {
+        return false;
+    }
+    return i == 0 || i == g.cells;
+}
+
+// True for interior unknown lanes 1..cells-1. A one-cell grid has
+// no interior lane: the single unknown sits between two walls and
+// the `cells == 1` model path handles it as a degenerate-but-valid
+// slice only where a kernel explicitly supports it.
+fn is_interior_lane(g: ChannelGrid, i: u64) -> (result: bool) {
+    if grid_is_ok(check_grid(g)) == false {
+        return false;
+    }
+    if i > g.cells {
+        return false;
+    }
+    return i != 0 && i != g.cells;
+}

@@ -1,0 +1,75 @@
+mncs 0.18;
+
+// Native contracts for derived quantities: trapezoidal flow rate
+// (exact dyadic values), one-sided wall shears and their
+// antisymmetry, and the discrete conservation identity.
+
+module mncs.fluid.test.derived.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.fluid.derived;
+
+test trap_sum_weights() -> (result: TestResult) {
+    // Half weight on wall lanes 0/4, unit weight inside.
+    let good: bool = trap_weight(0, 4) == 0.5 && trap_weight(1, 4) == 1.0 && trap_weight(4, 4) == 0.5;
+    return from_assertion(equals_bool(true, good, 6801));
+}
+
+test flow_rate_5_exact() -> (result: TestResult) {
+    // sum = 1.5 + 2 + 1.5 = 5; Q = 5*0.5 = 2.5.
+    let u: [f64; 5] = [0.0, 1.5, 2.0, 1.5, 0.0];
+    let sum: f64 = trap_sum_values(u, 4);
+    let good_sum: bool = sum == 5.0;
+    let good_q: bool = match flow_rate_value(sum, 0.5) {
+        RateOut.Value { q } => q == 2.5,
+        RateOut.BadInput => false,
+    };
+    let bad_h: bool = match flow_rate_value(sum, 0.0) {
+        RateOut.Value { q } => q != q,
+        RateOut.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, good_sum && good_q && bad_h, 6802));
+}
+
+test flow_rate_3_exact() -> (result: TestResult) {
+    // sum = 2; Q = 2*1 = 2.
+    let prof: [f64; 3] = [0.0, 2.0, 0.0];
+    let sum: f64 = trap_sum_values(prof, 2);
+    let good: bool = match flow_rate_value(sum, 1.0) {
+        RateOut.Value { q } => sum == 2.0 && q == 2.0,
+        RateOut.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 6803));
+}
+
+test wall_shears_5_exact() -> (result: TestResult) {
+    // tau_lo = (1.5 - 0)/0.5 = 3; tau_hi = (0 - 1.5)/0.5 = -3.
+    let lo: bool = match wall_shear_lo_value(1.0, 0.0, 1.5, 0.5) {
+        ShearOut.Value { tau } => tau == 3.0,
+        ShearOut.BadInput => false,
+    };
+    let hi: bool = match wall_shear_hi_value(1.0, 1.5, 0.0, 0.5) {
+        ShearOut.Value { tau } => tau == 0.0 - 3.0,
+        ShearOut.BadInput => false,
+    };
+    let bad_mu: bool = match wall_shear_lo_value(0.0, 0.0, 1.5, 0.5) {
+        ShearOut.Value { tau } => tau != tau,
+        ShearOut.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, lo && hi && bad_mu, 6804));
+}
+
+test conservation_identity_5_exact() -> (result: TestResult) {
+    // F_bottom = -3, F_top = 3, span = 3*0.5 = 1.5:
+    // (3 - (-3)) - 4*1.5 = 0 exact.
+    let span: f64 = interior_span_value(3, 0.5);
+    let imb: f64 = conservation_imbalance_value(0.0 - 3.0, 3.0, 4.0, span);
+    return from_assertion(equals_bool(true, span == 1.5 && imb == 0.0, 6805));
+}
+
+test conservation_identity_3_exact() -> (result: TestResult) {
+    // F_bottom = -2, F_top = 2, span = 1: (2+2) - 4 = 0 exact.
+    let imb: f64 = conservation_imbalance_value(0.0 - 2.0, 2.0, 4.0, interior_span_value(1, 1.0));
+    return from_assertion(equals_bool(true, imb == 0.0, 6806));
+}

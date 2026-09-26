@@ -1,0 +1,123 @@
+mncs 0.18;
+
+// Native contracts for the analytic Poiseuille comparators. Dyadic
+// expectations use exact `==`; the 8/3 flow rate and 4/3 mean use
+// library `approx`. The center-vs-profile agreement test re-derives
+// u(H/2) from first principles rather than calling analytic_center.
+
+module mncs.fluid.test.poiseuille.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.fluid.poiseuille;
+use mncs.numerics.scalar_float;
+
+test profile_values_dyadic() -> (result: TestResult) {
+    // G = 4, mu = 1, H = 2: u(y) = 2y(2-y).
+    let u05: bool = match analytic_u(4.0, 1.0, 2.0, 0.5) {
+        Analytic.Value { v } => v == 1.5,
+        Analytic.BadInput => false,
+    };
+    let u10: bool = match analytic_u(4.0, 1.0, 2.0, 1.0) {
+        Analytic.Value { v } => v == 2.0,
+        Analytic.BadInput => false,
+    };
+    let u15: bool = match analytic_u(4.0, 1.0, 2.0, 1.5) {
+        Analytic.Value { v } => v == 1.5,
+        Analytic.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, u05 && u10 && u15, 6401));
+}
+
+test no_slip_at_walls() -> (result: TestResult) {
+    let lo: bool = match analytic_u(4.0, 1.0, 2.0, 0.0) {
+        Analytic.Value { v } => v == 0.0,
+        Analytic.BadInput => false,
+    };
+    let hi: bool = match analytic_u(4.0, 1.0, 2.0, 2.0) {
+        Analytic.Value { v } => v == 0.0,
+        Analytic.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, lo && hi, 6402));
+}
+
+test center_matches_independent_formula() -> (result: TestResult) {
+    // umax = G*H^2/(8*mu) spelled here from first principles.
+    let exact: f64 = 4.0 * 2.0 * 2.0 / (8.0 * 1.0);
+    let good: bool = match analytic_center(4.0, 1.0, 2.0) {
+        Analytic.Value { v } => v == exact && v == 2.0,
+        Analytic.BadInput => false,
+    };
+    let via_profile: bool = match analytic_u(4.0, 1.0, 2.0, 1.0) {
+        Analytic.Value { v } => v == exact,
+        Analytic.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good && via_profile && exact == 2.0, 6403));
+}
+
+test flow_rate_and_mean() -> (result: TestResult) {
+    // Q = G*H^3/(12*mu) = 8/3; Umean = Q/H = 4/3.
+    let q: bool = match analytic_flow_rate(4.0, 1.0, 2.0) {
+        Analytic.Value { v } => approx(v, 2.6666666666666665, 0.000000000000001, 0.000000000000001),
+        Analytic.BadInput => false,
+    };
+    let m: bool = match analytic_mean_velocity(4.0, 1.0, 2.0) {
+        Analytic.Value { v } => approx(v, 4.0 / 3.0, 0.000000000000001, 0.000000000000001),
+        Analytic.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, q && m, 6404));
+}
+
+test wall_shear_value() -> (result: TestResult) {
+    // tau = G*H/2 = 4 exact.
+    let good: bool = match analytic_wall_shear(4.0, 2.0) {
+        Analytic.Value { v } => v == 4.0,
+        Analytic.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 6405));
+}
+
+test reversed_flow_keeps_sign() -> (result: TestResult) {
+    // G < 0 is legitimate reversed flow: velocities and shear negate.
+    let u: bool = match analytic_u(0.0 - 4.0, 1.0, 2.0, 1.0) {
+        Analytic.Value { v } => v == 0.0 - 2.0,
+        Analytic.BadInput => false,
+    };
+    let tau: bool = match analytic_wall_shear(0.0 - 4.0, 2.0) {
+        Analytic.Value { v } => v == 0.0 - 4.0,
+        Analytic.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, u && tau, 6406));
+}
+
+test zero_drive_gives_zero_field() -> (result: TestResult) {
+    let u: bool = match analytic_u(0.0, 1.0, 2.0, 1.0) {
+        Analytic.Value { v } => v == 0.0,
+        Analytic.BadInput => false,
+    };
+    let q: bool = match analytic_flow_rate(0.0, 1.0, 2.0) {
+        Analytic.Value { v } => v == 0.0,
+        Analytic.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, u && q, 6407));
+}
+
+test bad_regimes_rejected() -> (result: TestResult) {
+    let bad_mu: bool = match analytic_u(4.0, 0.0, 2.0, 1.0) {
+        Analytic.Value { v } => v != v,
+        Analytic.BadInput => true,
+    };
+    let bad_h: bool = match analytic_center(4.0, 1.0, 0.0) {
+        Analytic.Value { v } => v != v,
+        Analytic.BadInput => true,
+    };
+    let below: bool = match analytic_u(4.0, 1.0, 2.0, 0.0 - 0.5) {
+        Analytic.Value { v } => v != v,
+        Analytic.BadInput => true,
+    };
+    let above: bool = match analytic_u(4.0, 1.0, 2.0, 2.5) {
+        Analytic.Value { v } => v != v,
+        Analytic.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, bad_mu && bad_h && below && above, 6408));
+}

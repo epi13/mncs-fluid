@@ -1,0 +1,88 @@
+mncs 0.18;
+
+// Native contracts for Jacobi iteration: single-sweep values, wall
+// pinning, residual semantics, strict residual decrease across fixed
+// drivers, reference convergence against analysis, cross-solver
+// agreement with Thomas, and the convergence predicate.
+
+module mncs.fluid.test.jacobi.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.fluid.jacobi;
+use mncs.fluid.tridiag;
+use mncs.numerics.scalar_float;
+
+test sweep_from_zero_exact() -> (result: TestResult) {
+    // From rest with rhs = 1: every interior lane takes (0 + 0 + 1)/2.
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let x1: [f64; 5] = jacobi_sweep_values(rest, 4, 1.0);
+    let good: bool = x1[0] == 0.0 && x1[1] == 0.5 && x1[2] == 0.5 && x1[3] == 0.5 && x1[4] == 0.0;
+    return from_assertion(equals_bool(true, good, 6701));
+}
+
+test sweep_pins_walls() -> (result: TestResult) {
+    let wall: [f64; 5] = [1.0, 0.0, 0.0, 0.0, 2.0];
+    let x1: [f64; 5] = jacobi_sweep_values(wall, 4, 1.0);
+    return from_assertion(equals_bool(true, x1[0] == 1.0 && x1[4] == 2.0, 6702));
+}
+
+test sweep_preserves_symmetry() -> (result: TestResult) {
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let x1: [f64; 5] = jacobi_sweep_values(rest, 4, 1.0);
+    return from_assertion(equals_bool(true, x1[1] == x1[3], 6703));
+}
+
+test residual_of_exact_solution_tiny() -> (result: TestResult) {
+    // At the analytic nodes the algebraic residual is rounding only.
+    let exact: [f64; 5] = [0.0, 1.5, 2.0, 1.5, 0.0];
+    let res: f64 = max_residual_values(exact, 4, 1.0);
+    return from_assertion(equals_bool(true, res <= 0.000000000000001, 6704));
+}
+
+test residual_of_rest_is_rhs() -> (result: TestResult) {
+    // From rest: res = |rhs - 0| = 1 per lane.
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let res: f64 = max_residual_values(rest, 4, 1.0);
+    return from_assertion(equals_bool(true, res == 1.0, 6705));
+}
+
+test residual_decreases_strictly() -> (result: TestResult) {
+    // Fixed drivers strictly contract the residual on this system.
+    let x0: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let r8: f64 = max_residual_values(jacobi_8_values(x0, 4, 1.0), 4, 1.0);
+    let r32: f64 = max_residual_values(jacobi_32_values(x0, 4, 1.0), 4, 1.0);
+    let r128: f64 = max_residual_values(jacobi_128_values(x0, 4, 1.0), 4, 1.0);
+    return from_assertion(equals_bool(true, r8 < 1.0 && r32 < r8 && r128 < r32, 6706));
+}
+
+test reference_converges_to_analysis() -> (result: TestResult) {
+    // 128 sweeps from rest: full convergence to the analytic nodes.
+    let tol: f64 = 0.000000000001;
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let x: [f64; 5] = jacobi_128_values(rest, 4, 1.0);
+    let good: bool = approx(x[1], 1.5, tol, tol) && approx(x[2], 2.0, tol, tol) && approx(x[3], 1.5, tol, tol);
+    let res: f64 = max_residual_values(x, 4, 1.0);
+    return from_assertion(equals_bool(true, good && res <= 0.000000000001, 6707));
+}
+
+test solvers_agree() -> (result: TestResult) {
+    // Direct and iterative solvers land on the same discrete solution:
+    // cross-solver agreement independent of either algorithm.
+    let tol: f64 = 0.000000000001;
+    let rest: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0];
+    let xj: [f64; 5] = jacobi_128_values(rest, 4, 1.0);
+    let good: bool = match thomas_3(poiseuille_triple(), [1.0, 1.0, 1.0]) {
+        Solve3.Value { x } => approx(xj[1], x[0], tol, tol) && approx(xj[2], x[1], tol, tol) && approx(xj[3], x[2], tol, tol),
+        Solve3.ZeroPivot => false,
+    };
+    return from_assertion(equals_bool(true, good, 6708));
+}
+
+test convergence_predicate() -> (result: TestResult) {
+    let yes: bool = residual_converged(0.000000001, 0.00000001);
+    let no: bool = residual_converged(0.00000001, 0.000000001) == false;
+    // A non-positive tolerance never converges: structured false.
+    let bad: bool = residual_converged(0.0, 0.0) == false && residual_converged(0.0, 0.0 - 1.0) == false;
+    return from_assertion(equals_bool(true, yes && no && bad, 6709));
+}

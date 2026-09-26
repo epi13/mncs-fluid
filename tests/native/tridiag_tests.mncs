@@ -1,0 +1,102 @@
+mncs 0.18;
+
+// Native contracts for the Thomas direct solver: source-term mapping,
+// exact 1-lane solve, near-exact 3/7-lane solves against analysis,
+// singularity structure, and triple identity.
+
+module mncs.fluid.test.tridiag.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.fluid.tridiag;
+use mncs.numerics.scalar_float;
+
+test triple_identity() -> (result: TestResult) {
+    let t: Tridiag3 = poiseuille_triple();
+    return from_assertion(equals_bool(true, t.a == 0.0 - 1.0 && t.b == 2.0 && t.c == 0.0 - 1.0, 6601));
+}
+
+test steady_source_term_mapping() -> (result: TestResult) {
+    // rhs = G*h^2/mu = 4*0.25/1 = 1 exact.
+    let good: bool = match steady_rhs_value(4.0, 0.5, 1.0) {
+        RhsOut.Value { rhs } => rhs == 1.0,
+        RhsOut.BadInput => false,
+    };
+    let bad_h: bool = match steady_rhs_value(4.0, 0.0, 1.0) {
+        RhsOut.Value { rhs } => rhs != rhs,
+        RhsOut.BadInput => true,
+    };
+    let bad_mu: bool = match steady_rhs_value(4.0, 0.5, 0.0) {
+        RhsOut.Value { rhs } => rhs != rhs,
+        RhsOut.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, good && bad_h && bad_mu, 6602));
+}
+
+test thomas_1_exact() -> (result: TestResult) {
+    // 2x = 4: x = 2 exact (the 3-node center).
+    let good: bool = match thomas_1(poiseuille_triple(), 4.0) {
+        Solve1.Value { x0 } => x0 == 2.0,
+        Solve1.ZeroPivot => false,
+    };
+    let singular: bool = match thomas_1(Tridiag3 { a: 0.0 - 1.0, b: 0.0, c: 0.0 - 1.0 }, 4.0) {
+        Solve1.Value { x0 } => x0 != x0,
+        Solve1.ZeroPivot => true,
+    };
+    return from_assertion(equals_bool(true, good && singular, 6603));
+}
+
+test thomas_3_matches_analysis() -> (result: TestResult) {
+    // rhs = 1 per lane: discrete solution [1.5, 2, 1.5] up to a few
+    // ulp (divisions by 3/2 and 4/3 round); tolerance 1e-12.
+    let tol: f64 = 0.000000000001;
+    let good: bool = match thomas_3(poiseuille_triple(), [1.0, 1.0, 1.0]) {
+        Solve3.Value { x } => approx(x[0], 1.5, tol, tol) && approx(x[1], 2.0, tol, tol) && approx(x[2], 1.5, tol, tol),
+        Solve3.ZeroPivot => false,
+    };
+    return from_assertion(equals_bool(true, good, 6604));
+}
+
+test thomas_3_zero_pivot_structured() -> (result: TestResult) {
+    // Triple (1, 1, 1): lane-0 pivot 1 ok, lane-1 denom 1 - 1*1 = 0.
+    let t: Tridiag3 = Tridiag3 { a: 1.0, b: 1.0, c: 1.0 };
+    let singular: bool = match thomas_3(t, [1.0, 1.0, 1.0]) {
+        Solve3.Value { x } => x[0] != x[0],
+        Solve3.ZeroPivot => true,
+    };
+    // A zero diagonal is singular at lane 0 itself.
+    let zero_b: bool = match thomas_3(Tridiag3 { a: 0.0 - 1.0, b: 0.0, c: 0.0 - 1.0 }, [1.0, 1.0, 1.0]) {
+        Solve3.Value { x } => x[0] != x[0],
+        Solve3.ZeroPivot => true,
+    };
+    return from_assertion(equals_bool(true, singular && zero_b, 6605));
+}
+
+test thomas_3_symmetric_solution() -> (result: TestResult) {
+    // Symmetric system with uniform rhs: x[0] == x[2] to rounding.
+    let tol: f64 = 0.000000000001;
+    let good: bool = match thomas_3(poiseuille_triple(), [1.0, 1.0, 1.0]) {
+        Solve3.Value { x } => approx(x[0], x[2], tol, tol),
+        Solve3.ZeroPivot => false,
+    };
+    return from_assertion(equals_bool(true, good, 6606));
+}
+
+test thomas_7_matches_analysis() -> (result: TestResult) {
+    // rhs = 1/4 per lane: u = [7/8, 3/2, 15/8, 2, ...] to rounding.
+    let tol: f64 = 0.000000000001;
+    let good: bool = match thomas_7(poiseuille_triple(), [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]) {
+        Solve7.Value { x } => approx(x[0], 0.875, tol, tol) && approx(x[1], 1.5, tol, tol) && approx(x[2], 1.875, tol, tol) && approx(x[3], 2.0, tol, tol) && approx(x[4], 1.875, tol, tol) && approx(x[5], 1.5, tol, tol) && approx(x[6], 0.875, tol, tol),
+        Solve7.ZeroPivot => false,
+    };
+    return from_assertion(equals_bool(true, good, 6607));
+}
+
+test thomas_7_zero_pivot_structured() -> (result: TestResult) {
+    let t: Tridiag3 = Tridiag3 { a: 1.0, b: 1.0, c: 1.0 };
+    let singular: bool = match thomas_7(t, [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]) {
+        Solve7.Value { x } => x[0] != x[0],
+        Solve7.ZeroPivot => true,
+    };
+    return from_assertion(equals_bool(true, singular, 6608));
+}
