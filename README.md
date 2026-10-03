@@ -1,5 +1,21 @@
 # mncs-fluid
 
+<!-- MNCS:generated:begin -->
+## Project entry
+
+Machine-native computational fluid dynamics for MNCS: fluid-domain semantics and formulations (state variables, properties, fluxes, boundary/initial conditions, governing equations, discretization terms), expressed natively in mncs-language.
+
+```bash
+python3 scripts/run_tests.py
+```
+
+Declared capabilities (declarations do not establish execution health):
+
+- `fluid-simulation/0.1` — mncs-library (experimental)
+
+Semantic sources and ownership: `.mncs/projections.json`.
+<!-- MNCS:generated:end -->
+
 Machine-native computational fluid dynamics for MNCS.
 
 `mncs-fluid` is the canonical home of **fluid-domain semantics and

@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.project-intent/1",
+  "purpose": "Machine-native computational fluid dynamics for MNCS: fluid-domain semantics and formulations (state variables, properties, fluxes, boundary/initial conditions, governing equations, discretization terms), expressed natively in mncs-language.",
+  "entry": [
+    "python3 scripts/run_tests.py"
+  ],
+  "milestones": [
+    {
+      "id": "mncs-fluid:projection-conformance",
+      "title": "Declared ambient projection surfaces satisfy their contract",
+      "subject_slot": "declarations",
+      "evidence": "projection-conformance",
+      "dependencies": [],
+      "blockers": []
+    }
+  ]
+}
