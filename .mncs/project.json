@@ -1,0 +1,19 @@
+{
+  "schema_version": "mncs-family.repository-manifest/v0alpha1",
+  "repository": "mncs-fluid",
+  "revision": 1,
+  "manifest_location": "in-repository",
+  "authority": {"note": "Fluid owns fluid-domain semantics and formulations (state variables, properties, pressure gradients, fluxes, boundary/initial conditions, governing equations, discretization terms). Scalar/approx discipline consumed from mncs-numerics, never duplicated. FVM semantics are not forced into mncs-fem (untouched sibling). Variable-coefficient/sparse generic solving is open pressure P-FLUID-SOLVER: only its own uniform system is solved natively. Persists nothing, schedules nothing."},
+  "contracts": {
+    "provides": [
+      {"contract": "fluid-simulation", "version": "0.1", "kind": "mncs-library", "stability": "experimental", "fingerprint_sources": ["src/fluid/"]}
+    ],
+    "consumes": [
+      {"contract": "mncs-numerics.numeric-primitives", "envelope": {"op": "compatible-minor", "version": "1"}, "required": true, "evidence_refs": ["src/fluid/jacobi.mncs"]}
+    ],
+    "tests": [{"test": "fluid-tests", "covers": ["fluid-simulation"], "obligation": "self", "command": {"argv": ["python3", "scripts/run_tests.py"], "timeout_seconds": 300}}]
+  }
+,
+  "projection_inventory": ".mncs/projections.json",
+  "structure_profile": {"repository": "machine-native-complexity-development-specification", "path": "profiles/semantic-project.json", "identity": "sha256:259e41ea542e7a1400f1471b0316de4fafc888d6f953c8e91165ff2cfe1e78cb"}
+}

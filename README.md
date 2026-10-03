@@ -1,5 +1,8 @@
 # mncs-fluid
 
+<!-- MNCS:generated:begin -->
+<!-- MNCS:generated:end -->
+
 Machine-native computational fluid dynamics for MNCS.
 
 `mncs-fluid` is the canonical home of **fluid-domain semantics and
